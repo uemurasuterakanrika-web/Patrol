@@ -1,0 +1,7 @@
+{
+  "name": "現場安全パトロール点検表エージェント",
+  "description": "現場の安全パトロール点検をスマホで効率化するエージェント。音声入力による項目推定やPDF出力機能を備えています。",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
