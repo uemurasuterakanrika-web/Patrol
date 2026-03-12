@@ -364,11 +364,25 @@ export default function App() {
                       <div className="text-xs text-stone-500 mb-1 flex justify-between">
                         <span>{insp.date}</span>
                         <div className="flex gap-1">
-                          {insp.status === 'completed' && (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase bg-emerald-100 text-emerald-700">
-                              完了
-                            </span>
-                          )}
+                          {(() => {
+                            const items = insp.items || [];
+                            const allMarkers: DrawingMarker[] = [];
+                            items.forEach(item => {
+                              if (item.markers) {
+                                try { allMarkers.push(...JSON.parse(item.markers)); } catch (e) {}
+                              }
+                            });
+                            const issueItems = items.filter(item => item.rating === '✕' || item.rating === '×');
+                            const hasAnyIssue = issueItems.length > 0 || allMarkers.length > 0;
+                            const issuesResolved = issueItems.every(item => item.correctiveAction && item.correctiveAction.trim() !== "");
+                            const markersResolved = allMarkers.every(m => m.correctiveAction && m.correctiveAction.trim() !== "");
+                            if (hasAnyIssue && issuesResolved && markersResolved) {
+                              return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-700">処置完了</span>;
+                            } else if (hasAnyIssue) {
+                              return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700">処置完了待ち</span>;
+                            }
+                            return null;
+                          })()}
                         </div>
                       </div>
                       <div className="font-medium text-sm line-clamp-1">{insp.siteName || '名称未設定'}</div>
