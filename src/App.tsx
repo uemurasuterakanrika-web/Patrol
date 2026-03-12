@@ -616,17 +616,42 @@ export default function App() {
                                   <div>
                                     <div className="font-bold text-stone-800">{insp.date}</div>
                                     <div className="text-[10px] font-bold text-stone-500 uppercase tracking-wider flex items-center gap-1.5">
-                                      {insp.status === 'completed' ? (
-                                        <>
-                                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                                          完了
-                                        </>
-                                      ) : (
-                                        <>
-                                          <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-                                          処置完了待ち
-                                        </>
-                                      )}
+                                      {(() => {
+                                        const isResolved = (insp.items || []).every(item => {
+                                          // Check if it's an issue (X) or has any markers
+                                          const isIssue = item.rating === '✕' || item.rating === '×';
+                                          let markersResolved = true;
+                                          if (item.markers) {
+                                            try {
+                                              const markers: DrawingMarker[] = JSON.parse(item.markers);
+                                              markersResolved = markers.every(m => m.correctiveAction && m.correctiveAction.trim() !== "");
+                                            } catch (e) {}
+                                          }
+                                          
+                                          if (isIssue) {
+                                            // Must have corrective action and markers must be resolved
+                                            return item.correctiveAction && item.correctiveAction.trim() !== "" && markersResolved;
+                                          }
+                                          // If not an issue, just need markers to be resolved
+                                          return markersResolved;
+                                        });
+
+                                        if (isResolved && (insp.items || []).length > 0) {
+                                          return (
+                                            <>
+                                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                                              処置完了
+                                            </>
+                                          );
+                                        } else {
+                                          return (
+                                            <>
+                                              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                                              処置完了待ち
+                                            </>
+                                          );
+                                        }
+                                      })()}
                                     </div>
                                   </div>
                                 </div>
