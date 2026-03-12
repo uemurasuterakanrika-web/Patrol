@@ -925,7 +925,7 @@ export default function App() {
                                     initial={{ opacity: 0, y: 20 }}
                                     animate={{ opacity: 1, y: 0 }}
                                     exit={{ opacity: 0, y: 20 }}
-                                    className="bg-white rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl flex flex-col relative"
+                                    className="bg-white rounded-3xl w-full max-w-sm shadow-2xl flex flex-col relative max-h-[90vh]"
                                   >
                                     <button 
                                       onClick={() => setSelectedMarkerDetail(null)}
@@ -935,150 +935,152 @@ export default function App() {
                                       <X className="w-5 h-5" />
                                     </button>
 
-                                    <div className="relative aspect-video bg-stone-100 cursor-zoom-in group">
-                                      {selectedMarkerDetail.issuePhotoId ? (
-                                        <img 
-                                          src={selectedMarkerDetail.issuePhotoId} 
-                                          className="w-full h-full object-cover group-hover:opacity-90 transition-opacity" 
-                                          alt="指摘写真" 
-                                          onClick={() => setIsPreviewingPhoto(selectedMarkerDetail.issuePhotoId!)}
-                                        />
-                                      ) : (
-                                        <div className="w-full h-full flex flex-col items-center justify-center text-stone-300">
-                                          <Camera className="w-12 h-12 mb-2" />
-                                          <span className="text-xs">写真なし</span>
-                                        </div>
-                                      )}
-                                      {selectedMarkerDetail.issuePhotoId && (
-                                        <div className="absolute bottom-3 left-3 bg-black/50 text-white text-[10px] font-bold px-2 py-1 rounded backdrop-blur-sm pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
-                                          <Camera className="w-3 h-3" />
-                                          タップで拡大表示
-                                        </div>
-                                      )}
-                                    </div>
-                                    
-                                    <div className="p-6 space-y-4">
-                                      {isActiveCorrecting ? (
-                                        <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 relative">
-                                          <div className="space-y-1.5">
-                                            <div className="flex items-center justify-between">
-                                              <label className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">処置内容の入力</label>
-                                              <button onClick={() => setIsActiveCorrecting(false)} className="p-1 hover:bg-stone-100 rounded-full text-stone-400 transition-all" title="入力をキャンセル">
-                                                <X className="w-4 h-4" />
+                                    <div className="flex-1 overflow-y-auto overflow-x-hidden rounded-3xl custom-scrollbar">
+                                      <div className="relative aspect-video bg-stone-100 cursor-zoom-in group">
+                                        {selectedMarkerDetail.issuePhotoId ? (
+                                          <img 
+                                            src={selectedMarkerDetail.issuePhotoId} 
+                                            className="w-full h-full object-cover group-hover:opacity-90 transition-opacity" 
+                                            alt="指摘写真" 
+                                            onClick={() => setIsPreviewingPhoto(selectedMarkerDetail.issuePhotoId!)}
+                                          />
+                                        ) : (
+                                          <div className="w-full h-full flex flex-col items-center justify-center text-stone-300">
+                                            <Camera className="w-12 h-12 mb-2" />
+                                            <span className="text-xs">写真なし</span>
+                                          </div>
+                                        )}
+                                        {selectedMarkerDetail.issuePhotoId && (
+                                          <div className="absolute bottom-3 left-3 bg-black/50 text-white text-[10px] font-bold px-2 py-1 rounded backdrop-blur-sm pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
+                                            <Camera className="w-3 h-3" />
+                                            タップで拡大表示
+                                          </div>
+                                        )}
+                                      </div>
+                                      
+                                      <div className="p-6 space-y-4">
+                                        {isActiveCorrecting ? (
+                                          <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 relative">
+                                            <div className="space-y-1.5">
+                                              <div className="flex items-center justify-between">
+                                                <label className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">処置内容の入力</label>
+                                                <button onClick={() => setIsActiveCorrecting(false)} className="p-1 hover:bg-stone-100 rounded-full text-stone-400 transition-all" title="入力をキャンセル">
+                                                  <X className="w-4 h-4" />
+                                                </button>
+                                              </div>
+                                              <VoiceTextarea 
+                                                autoFocus
+                                                value={correctiveText}
+                                                onChange={(e) => setCorrectiveText(e.target.value)}
+                                                placeholder="どのような処置を行いましたか？"
+                                                className="w-full bg-stone-50 border-stone-100 rounded-xl px-4 py-3 text-base min-h-[100px]"
+                                                rows={3}
+                                              />
+                                            </div>
+                                            <div className="space-y-1.5">
+                                              <label className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">処置後の写真</label>
+                                              <div 
+                                                onClick={() => {
+                                                  const input = document.createElement('input');
+                                                  input.type = 'file';
+                                                  input.accept = 'image/*';
+                                                  input.onchange = (e: any) => {
+                                                    const file = e.target.files?.[0];
+                                                    if (!file) return;
+                                                    const reader = new FileReader();
+                                                    reader.onload = (event) => {
+                                                      const img = new Image();
+                                                      img.onload = () => {
+                                                        const canvas = document.createElement('canvas');
+                                                        const MAX = 1000;
+                                                        let w = img.width, h = img.height;
+                                                        if (w > h) { if (w > MAX) { h *= MAX / w; w = MAX; } } else { if (h > MAX) { w *= MAX / h; h = MAX; } }
+                                                        canvas.width = w; canvas.height = h;
+                                                        const ctx = canvas.getContext('2d');
+                                                        if (ctx) { ctx.drawImage(img, 0, 0, w, h); setCorrectivePhoto(canvas.toDataURL('image/jpeg', 0.6)); }
+                                                      };
+                                                      img.src = event.target?.result as string;
+                                                    };
+                                                    reader.readAsDataURL(file);
+                                                  };
+                                                  input.click();
+                                                }}
+                                                className={cn(
+                                                  "w-full aspect-video rounded-2xl border-2 border-dashed flex flex-col items-center justify-center cursor-pointer transition-all overflow-hidden",
+                                                  correctivePhoto ? "border-emerald-300 bg-emerald-50" : "border-stone-200 bg-stone-50"
+                                                )}
+                                              >
+                                                {correctivePhoto ? (
+                                                  <img src={correctivePhoto} className="w-full h-full object-cover" alt="Corrective" />
+                                                ) : (
+                                                  <Camera className="w-8 h-8 text-stone-300" />
+                                                )}
+                                              </div>
+                                            </div>
+                                            <button
+                                              onClick={() => {
+                                                handleUpdateMarker(selectedMarkerDetail.id, {
+                                                  correctiveAction: correctiveText,
+                                                  correctivePhotoId: correctivePhoto || undefined
+                                                });
+                                                setIsActiveCorrecting(false);
+                                                setSelectedMarkerDetail(null);
+                                                confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 }, colors: ['#10b981', '#34d399', '#6ee7b7'] });
+                                              }}
+                                              disabled={!correctiveText || !correctivePhoto}
+                                              className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
+                                            >
+                                              処置を完了する
+                                            </button>
+                                          </div>
+                                        ) : (
+                                          <>
+                                            <div>
+                                              <div className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest mb-1">指摘事項</div>
+                                              <h3 className="text-lg font-bold text-stone-800 leading-tight">
+                                                {selectedMarkerDetail.description || selectedMarkerDetail.label}
+                                              </h3>
+                                            </div>
+
+                                            {selectedMarkerDetail.correctiveAction && (
+                                              <div className="p-4 bg-emerald-50 rounded-2xl border border-emerald-100">
+                                                <div className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest mb-1 flex items-center gap-1">
+                                                  <CheckCircle2 className="w-3 h-3" /> 実施済み処置
+                                                </div>
+                                                <p className="text-sm text-stone-700 font-medium">{selectedMarkerDetail.correctiveAction}</p>
+                                                {selectedMarkerDetail.correctivePhotoId && (
+                                                  <button 
+                                                    onClick={() => setIsPreviewingPhoto(selectedMarkerDetail.correctivePhotoId!)}
+                                                    className="mt-2 w-full aspect-video rounded-xl overflow-hidden border border-emerald-200"
+                                                  >
+                                                    <img src={selectedMarkerDetail.correctivePhotoId} className="w-full h-full object-cover" alt="処置写真" />
+                                                  </button>
+                                                )}
+                                              </div>
+                                            )}
+
+                                            <div className="flex gap-2 pt-2">
+                                              <button
+                                                onClick={() => {
+                                                  setCorrectiveText(selectedMarkerDetail.correctiveAction || "");
+                                                  setCorrectivePhoto(selectedMarkerDetail.correctivePhotoId || null);
+                                                  setIsActiveCorrecting(true);
+                                                }}
+                                                className="flex-1 py-3 bg-stone-100 text-stone-700 rounded-xl font-bold text-sm hover:bg-stone-200 flex items-center justify-center gap-2"
+                                              >
+                                                <Edit2 className="w-4 h-4" />
+                                                処置内容
+                                              </button>
+                                              <button
+                                                onClick={() => setSelectedMarkerDetail(null)}
+                                                className="flex-1 py-3 bg-emerald-600 text-white rounded-xl font-bold text-sm hover:bg-emerald-700 shadow-md"
+                                              >
+                                                閉じる
                                               </button>
                                             </div>
-                                            <VoiceTextarea 
-                                              autoFocus
-                                              value={correctiveText}
-                                              onChange={(e) => setCorrectiveText(e.target.value)}
-                                              placeholder="どのような処置を行いましたか？"
-                                              className="w-full bg-stone-50 border-stone-100 rounded-xl px-4 py-3 text-base min-h-[100px]"
-                                              rows={3}
-                                            />
-                                          </div>
-                                          <div className="space-y-1.5">
-                                            <label className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">処置後の写真</label>
-                                            <div 
-                                              onClick={() => {
-                                                const input = document.createElement('input');
-                                                input.type = 'file';
-                                                input.accept = 'image/*';
-                                                input.onchange = (e: any) => {
-                                                  const file = e.target.files?.[0];
-                                                  if (!file) return;
-                                                  const reader = new FileReader();
-                                                  reader.onload = (event) => {
-                                                    const img = new Image();
-                                                    img.onload = () => {
-                                                      const canvas = document.createElement('canvas');
-                                                      const MAX = 1000;
-                                                      let w = img.width, h = img.height;
-                                                      if (w > h) { if (w > MAX) { h *= MAX / w; w = MAX; } } else { if (h > MAX) { w *= MAX / h; h = MAX; } }
-                                                      canvas.width = w; canvas.height = h;
-                                                      const ctx = canvas.getContext('2d');
-                                                      if (ctx) { ctx.drawImage(img, 0, 0, w, h); setCorrectivePhoto(canvas.toDataURL('image/jpeg', 0.6)); }
-                                                    };
-                                                    img.src = event.target?.result as string;
-                                                  };
-                                                  reader.readAsDataURL(file);
-                                                };
-                                                input.click();
-                                              }}
-                                              className={cn(
-                                                "w-full aspect-video rounded-2xl border-2 border-dashed flex flex-col items-center justify-center cursor-pointer transition-all overflow-hidden",
-                                                correctivePhoto ? "border-emerald-300 bg-emerald-50" : "border-stone-200 bg-stone-50"
-                                              )}
-                                            >
-                                              {correctivePhoto ? (
-                                                <img src={correctivePhoto} className="w-full h-full object-cover" alt="Corrective" />
-                                              ) : (
-                                                <Camera className="w-8 h-8 text-stone-300" />
-                                              )}
-                                            </div>
-                                          </div>
-                                          <button
-                                            onClick={() => {
-                                              handleUpdateMarker(selectedMarkerDetail.id, {
-                                                correctiveAction: correctiveText,
-                                                correctivePhotoId: correctivePhoto || undefined
-                                              });
-                                              setIsActiveCorrecting(false);
-                                              setSelectedMarkerDetail(null);
-                                              confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 }, colors: ['#10b981', '#34d399', '#6ee7b7'] });
-                                            }}
-                                            disabled={!correctiveText || !correctivePhoto}
-                                            className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
-                                          >
-                                            処置を完了する
-                                          </button>
-                                        </div>
-                                      ) : (
-                                        <>
-                                          <div>
-                                            <div className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest mb-1">指摘事項</div>
-                                            <h3 className="text-lg font-bold text-stone-800 leading-tight">
-                                              {selectedMarkerDetail.description || selectedMarkerDetail.label}
-                                            </h3>
-                                          </div>
-
-                                          {selectedMarkerDetail.correctiveAction && (
-                                            <div className="p-4 bg-emerald-50 rounded-2xl border border-emerald-100">
-                                              <div className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest mb-1 flex items-center gap-1">
-                                                <CheckCircle2 className="w-3 h-3" /> 実施済み処置
-                                              </div>
-                                              <p className="text-sm text-stone-700 font-medium">{selectedMarkerDetail.correctiveAction}</p>
-                                              {selectedMarkerDetail.correctivePhotoId && (
-                                                <button 
-                                                  onClick={() => setIsPreviewingPhoto(selectedMarkerDetail.correctivePhotoId!)}
-                                                  className="mt-2 w-full aspect-video rounded-xl overflow-hidden border border-emerald-200"
-                                                >
-                                                  <img src={selectedMarkerDetail.correctivePhotoId} className="w-full h-full object-cover" alt="処置写真" />
-                                                </button>
-                                              )}
-                                            </div>
-                                          )}
-
-                                          <div className="flex gap-2 pt-2">
-                                            <button
-                                              onClick={() => {
-                                                setCorrectiveText(selectedMarkerDetail.correctiveAction || "");
-                                                setCorrectivePhoto(selectedMarkerDetail.correctivePhotoId || null);
-                                                setIsActiveCorrecting(true);
-                                              }}
-                                              className="flex-1 py-3 bg-stone-100 text-stone-700 rounded-xl font-bold text-sm hover:bg-stone-200 flex items-center justify-center gap-2"
-                                            >
-                                              <Edit2 className="w-4 h-4" />
-                                              処置内容
-                                            </button>
-                                            <button
-                                              onClick={() => setSelectedMarkerDetail(null)}
-                                              className="flex-1 py-3 bg-emerald-600 text-white rounded-xl font-bold text-sm hover:bg-emerald-700 shadow-md"
-                                            >
-                                              閉じる
-                                            </button>
-                                          </div>
-                                        </>
-                                      )}
+                                          </>
+                                        )}
+                                      </div>
                                     </div>
                                   </motion.div>
                                 </div>
