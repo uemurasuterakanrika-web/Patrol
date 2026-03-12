@@ -18,3 +18,52 @@
 .markdown-body ul {
   @apply list-disc list-inside mb-2;
 }
+
+@media print {
+  /* Hide UI elements */
+  aside, header, nav, .lg\:relative, button, .lucide {
+    display: none !important;
+  }
+  
+  .bg-stone-50 {
+    background-color: white !important;
+  }
+  
+  main {
+    position: static !important;
+    overflow: visible !important;
+    height: auto !important;
+  }
+  
+  .overflow-y-auto {
+    overflow: visible !important;
+    height: auto !important;
+  }
+
+  /* Reset layout for report */
+  .max-w-3xl {
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  section {
+    break-inside: avoid;
+    border: 1px solid #e5e7eb !important;
+    margin-bottom: 2rem !important;
+  }
+
+  img {
+    max-height: 400px;
+    object-fit: contain;
+  }
+
+  .shadow-sm, .shadow-md, .shadow-xl {
+    box-shadow: none !important;
+  }
+
+  .rounded-2xl {
+    border-radius: 0 !important;
+  }
+}
+

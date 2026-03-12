@@ -1,8 +1,11 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
+import { createServer } from "http";
+import { Server } from "socket.io";
 import Database from "better-sqlite3";
 import path from "path";
 import { fileURLToPath } from "url";
+import { networkInterfaces } from "os";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,7 +17,16 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS sites (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
-    drawingPdfId TEXT
+    address TEXT,
+    managerName TEXT,
+    drawingPdfId INTEGER,
+    FOREIGN KEY (drawingPdfId) REFERENCES files(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content BLOB,
+    mimeType TEXT
   );
 
   CREATE TABLE IF NOT EXISTS inspections (
@@ -49,6 +61,7 @@ const addColumn = (table: string, column: string, type: string) => {
 
 addColumn("sites", "address", "TEXT");
 addColumn("sites", "managerName", "TEXT");
+addColumn("sites", "drawingPdfId", "INTEGER");
 addColumn("inspections", "date", "TEXT");
 addColumn("inspections", "inspectorName", "TEXT");
 addColumn("inspections", "workerCount", "INTEGER");
@@ -58,19 +71,70 @@ addColumn("inspections", "score", "INTEGER");
 addColumn("inspections", "rank", "TEXT");
 addColumn("inspections", "templateVersion", "TEXT");
 addColumn("inspection_items", "photoCaption", "TEXT");
-
-// Seed initial sites if empty
-const siteCount = db.prepare("SELECT COUNT(*) as count FROM sites").get() as { count: number };
-if (siteCount.count === 0) {
-  // Initial seed removed as per user request
-}
+addColumn("inspection_items", "correctiveAction", "TEXT");
+addColumn("inspection_items", "correctivePhotoId", "TEXT");
+addColumn("inspection_items", "correctivePhotoCaption", "TEXT");
+addColumn("inspection_items", "markers", "TEXT");
 
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '50mb' }));
-  app.use(express.urlencoded({ limit: '50mb', extended: true }));
+  const httpServer = createServer(app);
+  const io = new Server(httpServer, {
+    cors: {
+      origin: "*",
+      methods: ["GET", "POST", "PATCH", "DELETE"]
+    }
+  });
+
+  app.use(express.json({ limit: '100mb' }));
+  app.use(express.urlencoded({ limit: '100mb', extended: true }));
+
+  // Logging Middleware
+  app.use((req, res, next) => {
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+    next();
+  });
+
+  // Middleware to broadcast updates
+  const broadcastUpdate = (type: string, id?: any) => {
+    io.emit('dataUpdated', { type, id });
+  };
 
   // API Routes
+  app.get("/api/ping", (req, res) => {
+    res.json({ status: "ok", time: new Date().toISOString() });
+  });
+
+  app.get("/api/files/:id", (req, res, next) => {
+    try {
+      const file = db.prepare("SELECT * FROM files WHERE id = ?").get(req.params.id) as { content: Buffer, mimeType: string } | undefined;
+      if (!file) return res.status(404).send("File not found");
+      res.contentType(file.mimeType);
+      res.send(file.content);
+    } catch (e) { next(e); }
+  });
+
+  app.post("/api/files", (req, res, next) => {
+    try {
+      let { content, mimeType } = req.body;
+      if (!content) return res.status(400).json({ error: "Content is required" });
+
+      let dataToSave = content;
+      if (typeof content === 'string' && content.startsWith('data:')) {
+        const base64Part = content.split(',')[1];
+        if (!base64Part) return res.status(400).json({ error: "Invalid data URL" });
+        dataToSave = Buffer.from(base64Part, 'base64');
+      }
+
+      console.log(`Saving file: type=${mimeType}, size=${dataToSave.length} bytes`);
+      const result = db.prepare("INSERT INTO files (content, mimeType) VALUES (?, ?)").run(dataToSave, mimeType || 'application/pdf');
+      res.json({ id: result.lastInsertRowid });
+    } catch (e) {
+      console.error("POST /api/files Error:", e);
+      next(e);
+    }
+  });
+
   app.get("/api/sites", (req, res, next) => {
     try {
       const sites = db.prepare("SELECT * FROM sites").all();
@@ -82,6 +146,7 @@ async function startServer() {
     try {
       const { name, address, managerName, drawingPdfId } = req.body;
       const result = db.prepare("INSERT INTO sites (name, address, managerName, drawingPdfId) VALUES (?, ?, ?, ?)").run(name, address, managerName, drawingPdfId);
+      broadcastUpdate('sites');
       res.json({ id: result.lastInsertRowid });
     } catch (e) { next(e); }
   });
@@ -90,12 +155,13 @@ async function startServer() {
     try {
       const { name, address, managerName, drawingPdfId } = req.body;
       const { id } = req.params;
-      
+
       if (name !== undefined) db.prepare("UPDATE sites SET name = ? WHERE id = ?").run(name, id);
       if (address !== undefined) db.prepare("UPDATE sites SET address = ? WHERE id = ?").run(address, id);
       if (managerName !== undefined) db.prepare("UPDATE sites SET managerName = ? WHERE id = ?").run(managerName, id);
       if (drawingPdfId !== undefined) db.prepare("UPDATE sites SET drawingPdfId = ? WHERE id = ?").run(drawingPdfId, id);
-      
+
+      broadcastUpdate('sites', id);
       res.json({ success: true });
     } catch (e) { next(e); }
   });
@@ -103,15 +169,13 @@ async function startServer() {
   app.delete("/api/sites/:id", (req, res, next) => {
     try {
       const { id } = req.params;
-      // Delete inspection items first
       db.prepare(`
         DELETE FROM inspection_items 
         WHERE inspectionId IN (SELECT id FROM inspections WHERE siteId = ?)
       `).run(id);
-      // Delete inspections
       db.prepare("DELETE FROM inspections WHERE siteId = ?").run(id);
-      // Delete site
       db.prepare("DELETE FROM sites WHERE id = ?").run(id);
+      broadcastUpdate('sites', id);
       res.json({ success: true });
     } catch (e) { next(e); }
   });
@@ -139,7 +203,7 @@ async function startServer() {
     try {
       const inspection = db.prepare("SELECT * FROM inspections WHERE id = ?").get(req.params.id);
       if (!inspection) return res.status(404).json({ error: "Not found" });
-      
+
       const items = db.prepare("SELECT * FROM inspection_items WHERE inspectionId = ?").all(req.params.id);
       res.json({ ...inspection, items });
     } catch (e) { next(e); }
@@ -152,6 +216,7 @@ async function startServer() {
         INSERT INTO inspections (siteId, date, inspectorName, workerCount, workContent, templateVersion) 
         VALUES (?, ?, ?, ?, ?, ?)
       `).run(siteId, date, inspectorName, workerCount, workContent, templateVersion);
+      broadcastUpdate('inspections');
       res.json({ id: result.lastInsertRowid });
     } catch (e) { next(e); }
   });
@@ -171,6 +236,7 @@ async function startServer() {
             status = COALESCE(?, status)
         WHERE id = ?
       `).run(date, inspectorName, workerCount, workContent, overallComment, score, rank, status, req.params.id);
+      broadcastUpdate('inspections', req.params.id);
       res.json({ success: true });
     } catch (e) { next(e); }
   });
@@ -180,42 +246,59 @@ async function startServer() {
       const { id } = req.params;
       db.prepare("DELETE FROM inspection_items WHERE inspectionId = ?").run(id);
       db.prepare("DELETE FROM inspections WHERE id = ?").run(id);
+      broadcastUpdate('inspections', id);
       res.json({ success: true });
     } catch (e) { next(e); }
   });
 
   app.post("/api/inspections/:id/items", (req, res, next) => {
     try {
-      const { itemId, rating, comment, photoId, photoCaption } = req.body;
+      const { itemId, rating, comment, correctiveAction, photoId, photoCaption, correctivePhotoId, correctivePhotoCaption, markers } = req.body;
       const inspectionId = req.params.id;
-      
-      // Upsert logic
+
       const existing = db.prepare("SELECT id FROM inspection_items WHERE inspectionId = ? AND itemId = ?").get(inspectionId, itemId) as { id: number } | undefined;
-      
+
       if (existing) {
         db.prepare(`
           UPDATE inspection_items 
           SET rating = COALESCE(?, rating), 
               comment = COALESCE(?, comment), 
+              correctiveAction = COALESCE(?, correctiveAction),
               photoId = COALESCE(?, photoId),
-              photoCaption = COALESCE(?, photoCaption)
+              photoCaption = COALESCE(?, photoCaption),
+              correctivePhotoId = COALESCE(?, correctivePhotoId),
+              correctivePhotoCaption = COALESCE(?, correctivePhotoCaption),
+              markers = COALESCE(?, markers)
           WHERE id = ?
-        `).run(rating, comment, photoId, photoCaption, existing.id);
+        `).run(rating, comment, correctiveAction, photoId, photoCaption, correctivePhotoId, correctivePhotoCaption, markers, existing.id);
+        broadcastUpdate('inspection_item', inspectionId);
         res.json({ id: existing.id, updated: true });
       } else {
         const result = db.prepare(`
-          INSERT INTO inspection_items (inspectionId, itemId, rating, comment, photoId, photoCaption) 
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(inspectionId, itemId, rating, comment, photoId, photoCaption);
+          INSERT INTO inspection_items (inspectionId, itemId, rating, comment, correctiveAction, photoId, photoCaption, correctivePhotoId, correctivePhotoCaption, markers) 
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(inspectionId, itemId, rating, comment, correctiveAction, photoId, photoCaption, correctivePhotoId, correctivePhotoCaption, markers);
+        broadcastUpdate('inspection_item', inspectionId);
         res.json({ id: result.lastInsertRowid, created: true });
       }
     } catch (e) { next(e); }
   });
 
+  // Catch-all for undefined /api routes
+  app.all("/api/*", (req, res) => {
+    console.warn(`[NOT FOUND] ${req.method} ${req.url}`);
+    res.status(404).json({ error: "API Route Not Found: " + req.url });
+  });
+
   // Global Error Handler
   app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
     console.error("Express Error:", err);
-    res.status(500).json({ error: err.message || "Internal Server Error" });
+    // Ensure we always return JSON
+    const status = err.status || err.statusCode || 500;
+    res.status(status).json({
+      error: err.message || "Internal Server Error",
+      status: status
+    });
   });
 
   // Vite middleware for development
@@ -233,8 +316,32 @@ async function startServer() {
   }
 
   const PORT = 3000;
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  
+  const getLocalIp = () => {
+    const interfaces = networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+      for (const iface of interfaces[name]!) {
+        if (iface.family === 'IPv4' && !iface.internal) {
+          return iface.address;
+        }
+      }
+    }
+    return 'localhost';
+  };
+
+  const localIp = getLocalIp();
+
+  httpServer.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on:`);
+    console.log(`  - Local:   http://localhost:${PORT}`);
+    console.log(`  - Network: http://${localIp}:${PORT}`);
+  });
+
+  io.on('connection', (socket) => {
+    console.log('Client connected:', socket.id);
+    socket.on('disconnect', () => {
+      console.log('Client disconnected:', socket.id);
+    });
   });
 }
 

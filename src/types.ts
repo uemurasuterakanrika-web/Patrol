@@ -3,7 +3,7 @@ export interface Site {
   name: string;
   address?: string;
   managerName?: string;
-  drawingPdfId?: string;
+  drawingPdfId?: number;
 }
 
 export interface Inspection {
@@ -22,14 +22,31 @@ export interface Inspection {
   items?: InspectionItem[];
 }
 
+export interface DrawingMarker {
+  id: string;
+  x: number;
+  y: number;
+  label: string;
+  type: 'issue' | 'photo';
+  page?: number;
+  issuePhotoId?: string;
+  description?: string;
+  correctiveAction?: string;
+  correctivePhotoId?: string;
+}
+
 export interface InspectionItem {
   id?: number;
   inspectionId: number;
   itemId: string;
   rating: '〇' | '△' | '✕' | '○' | '×' | '';
   comment?: string;
+  correctiveAction?: string;
   photoId?: string;
   photoCaption?: string;
+  correctivePhotoId?: string;
+  correctivePhotoCaption?: string;
+  markers?: string; // JSON string of DrawingMarker[]
 }
 
 export interface InspectionItemMaster {

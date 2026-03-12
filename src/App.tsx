@@ -1,14 +1,14 @@
-import React, { useState, useEffect, useRef } from "react";
-import { 
-  Plus, 
-  ClipboardCheck, 
-  MapPin, 
-  Calendar, 
-  User, 
-  Users, 
-  HardHat, 
-  CheckCircle2, 
-  AlertTriangle, 
+import React, { useState, useEffect } from "react";
+import {
+  Plus,
+  ClipboardCheck,
+  MapPin,
+  Calendar,
+  User,
+  Users,
+  HardHat,
+  CheckCircle2,
+  AlertTriangle,
   XCircle,
   FileText,
   ChevronRight,
@@ -17,12 +17,18 @@ import {
   Camera,
   Trash2,
   ArrowLeft,
-  Edit2
+  Edit2,
+  FileUp,
+  Pin
 } from "lucide-react";
+import confetti from 'canvas-confetti';
 import { motion, AnimatePresence } from "motion/react";
+import { io } from "socket.io-client";
 import { api } from "./services/api";
-import { Site, Inspection, InspectionItem } from "./types";
+import { Site, Inspection, InspectionItem, DrawingMarker } from "./types";
 import { INSPECTION_ITEMS } from "./constants";
+import { VoiceInput, VoiceTextarea } from "./components/VoiceInput";
+import { DrawingViewer } from "./components/DrawingViewer";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
@@ -39,13 +45,86 @@ export default function App() {
   const [isAddingSite, setIsAddingSite] = useState(false);
   const [newSiteName, setNewSiteName] = useState("");
   const [newSiteManager, setNewSiteManager] = useState("");
+  const [newSiteDrawing, setNewSiteDrawing] = useState<string | null>(null);
   const [editingSiteId, setEditingSiteId] = useState<number | null>(null);
   const [editSiteName, setEditSiteName] = useState("");
   const [editSiteManager, setEditSiteManager] = useState("");
-  
+  const [isDrawingFullView, setIsDrawingFullView] = useState(false);
+  const [pinningForItem, setPinningForItem] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [viewingSiteHistory, setViewingSiteHistory] = useState<Site | null>(null);
+  const [activeMarkerInput, setActiveMarkerInput] = useState<{
+    markerData: Omit<DrawingMarker, 'id'>;
+    targetItemId: string;
+  } | null>(null);
+  const [markerDescription, setMarkerDescription] = useState("");
+  const [markerPhoto, setMarkerPhoto] = useState<string | null>(null);
+  const [selectedMarkerDetail, setSelectedMarkerDetail] = useState<DrawingMarker | null>(null);
+  const [isPreviewingPhoto, setIsPreviewingPhoto] = useState<string | null>(null);
+  const [isActiveCorrecting, setIsActiveCorrecting] = useState(false);
+  const [correctiveText, setCorrectiveText] = useState("");
+  const [correctivePhoto, setCorrectivePhoto] = useState<string | null>(null);
+
+  const handleUpdateMarker = (markerId: string, updates: Partial<DrawingMarker>) => {
+    if (!currentInspection) return;
+    const items = [...(currentInspection.items || [])];
+    let found = false;
+    const updatedItems = items.map(item => {
+      if (!item.markers) return item;
+      try {
+        const markers: DrawingMarker[] = JSON.parse(item.markers);
+        const markerIdx = markers.findIndex(m => m.id === markerId);
+        if (markerIdx >= 0) {
+          markers[markerIdx] = { ...markers[markerIdx], ...updates };
+          found = true;
+          return { ...item, markers: JSON.stringify(markers) };
+        }
+      } catch (e) {}
+      return item;
+    });
+    if (found) {
+      setCurrentInspection({ ...currentInspection, items: updatedItems });
+      const changedItem = updatedItems.find(i => {
+        const old = items.find(oi => oi.itemId === i.itemId);
+        return old?.markers !== i.markers;
+      });
+      if (changedItem) {
+        api.registerItemResult(currentInspection.id, changedItem);
+      }
+    }
+  };
   useEffect(() => {
     loadInitialData();
   }, []);
+
+  useEffect(() => {
+    const socket = io();
+    socket.on('dataUpdated', async (data) => {
+      const [sitesData, inspectionsData] = await Promise.all([
+        api.getSites(),
+        api.getInspections()
+      ]);
+      setSites(sitesData);
+      setInspections(inspectionsData);
+
+      if (currentInspection && (
+        (data.type === 'inspections' && data.id == currentInspection.id) ||
+        (data.type === 'inspection_item' && data.id == currentInspection.id)
+      )) {
+        const updated = await api.getInspection(currentInspection.id);
+        setCurrentInspection(updated);
+      }
+
+      if (currentSite && data.type === 'sites' && data.id == currentSite.id) {
+        const updatedSite = sitesData.find(s => s.id === currentSite.id);
+        if (updatedSite) setCurrentSite(updatedSite);
+      }
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [currentInspection, currentSite]);
 
   const loadInitialData = async () => {
     const [sitesData, inspectionsData] = await Promise.all([
@@ -56,24 +135,19 @@ export default function App() {
     setInspections(inspectionsData);
   };
 
-  const handleManualItemUpdate = async (itemId: string, rating?: string, comment?: string, photoId?: string, photoCaption?: string) => {
+  const handleManualItemUpdate = async (itemId: string, updates: Partial<InspectionItem>) => {
     if (!currentInspection) return;
     try {
       await api.registerItemResult(currentInspection.id, {
         itemId,
-        rating: rating as any,
-        comment,
-        photoId,
-        photoCaption
+        ...updates
       });
-      const updated = await api.getInspection(currentInspection.id);
-      setCurrentInspection(updated);
     } catch (err) {
       console.error("Manual item update error:", err);
     }
   };
 
-  const handlePhotoUpload = (itemId: string, currentRating?: string, currentComment?: string) => {
+  const handlePhotoUpload = (itemId: string, existingData: Partial<InspectionItem>, isCorrectivePhoto: boolean = false) => {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = 'image/*';
@@ -84,8 +158,6 @@ export default function App() {
       const reader = new FileReader();
       reader.onload = async (event) => {
         const originalBase64 = event.target?.result as string;
-        
-        // Resize image
         const img = new Image();
         img.onload = () => {
           const canvas = document.createElement('canvas');
@@ -110,10 +182,15 @@ export default function App() {
           canvas.height = height;
           const ctx = canvas.getContext('2d');
           ctx?.drawImage(img, 0, 0, width, height);
-          
-          // Convert to JPEG with 0.7 quality
+
           const resizedBase64 = canvas.toDataURL('image/jpeg', 0.7);
-          handleManualItemUpdate(itemId, currentRating, currentComment, resizedBase64);
+          const updates = { ...existingData };
+          if (isCorrectivePhoto) {
+            updates.correctivePhotoId = resizedBase64;
+          } else {
+            updates.photoId = resizedBase64;
+          }
+          handleManualItemUpdate(itemId, updates);
         };
         img.src = originalBase64;
       };
@@ -126,247 +203,128 @@ export default function App() {
     if (!currentInspection) return;
     try {
       await api.updateInspection(currentInspection.id, data);
-      const updated = await api.getInspection(currentInspection.id);
-      setCurrentInspection(updated);
     } catch (err) {
       console.error("Manual header update error:", err);
     }
   };
 
-  const handleCreateSite = async () => {
-    if (!newSiteName.trim()) return;
+  const handleUpdateSiteSimple = async (id: number, updates: Partial<Site>) => {
     try {
-      await api.createSite(newSiteName.trim(), undefined, newSiteManager.trim());
+      await api.updateSite(id, updates);
+    } catch (err) {
+      console.error("Simple site update error:", err);
+    }
+  };
+
+  const handleCreateSite = async () => {
+    if (isUploading || !newSiteName.trim()) return;
+    try {
+      setIsUploading(true);
+      let drawingPdfId = undefined;
+      if (newSiteDrawing) {
+        console.log("Uploading PDF drawing...");
+        const uploadRes = await api.uploadFile(newSiteDrawing);
+        drawingPdfId = Number(uploadRes.id);
+      }
+
+      const finalName = newSiteName.trim().endsWith("新築工事") ? newSiteName.trim() : `${newSiteName.trim()} 新築工事`;
+      await api.createSite(finalName, undefined, newSiteManager.trim(), drawingPdfId);
       setNewSiteName("");
       setNewSiteManager("");
+      setNewSiteDrawing(null);
       setIsAddingSite(false);
       await loadInitialData();
-    } catch (err) {
+      alert("現場を登録しました");
+    } catch (err: any) {
       console.error("Create site error:", err);
-      alert("現場の作成に失敗しました。");
+      alert("現場の作成に失敗しました: " + (err.message || "通信エラー"));
+    } finally {
+      setIsUploading(false);
     }
   };
 
   const handleUpdateSite = async (siteId: number) => {
-    if (!editSiteName.trim()) return;
+    if (isUploading || !editSiteName.trim()) return;
     try {
-      await api.updateSite(siteId, { name: editSiteName.trim(), managerName: editSiteManager.trim() });
+      setIsUploading(true);
+      let drawingPdfId = undefined;
+      // If a new drawing was selected during edit, upload it
+      if (newSiteDrawing) {
+        console.log("Updating PDF drawing...");
+        const uploadRes = await api.uploadFile(newSiteDrawing);
+        drawingPdfId = Number(uploadRes.id);
+      }
+
+      const finalName = editSiteName.trim().endsWith("新築工事") ? editSiteName.trim() : `${editSiteName.trim()} 新築工事`;
+      await api.updateSite(siteId, {
+        name: finalName,
+        managerName: editSiteManager.trim(),
+        drawingPdfId: drawingPdfId
+      });
       setEditingSiteId(null);
       setEditSiteName("");
       setEditSiteManager("");
+      setNewSiteDrawing(null);
       await loadInitialData();
-    } catch (err) {
+      alert("現場情報を更新しました");
+    } catch (err: any) {
       console.error("Update site error:", err);
-      alert("現場名の更新に失敗しました。");
+      alert("現場名の更新に失敗しました: " + (err.message || "通信エラー"));
+    } finally {
+      setIsUploading(false);
     }
   };
 
   const handleDeleteSite = async (e: React.MouseEvent, siteId: number) => {
-    if (!confirm("【警告】この現場自体を完全に削除しますか？\nこの操作により、この現場に関連するすべての点検記録（パトロール点検表）もすべて削除され、元に戻すことはできません。")) return;
-    
-    // Capture state for rollback if needed
-    let previousSites: Site[] = [];
-    let previousInspections: Inspection[] = [];
-    
-    // Immediate UI update using functional form
-    setSites(prev => {
-      previousSites = [...prev];
-      return prev.filter(s => s.id !== siteId);
-    });
-    setInspections(prev => {
-      previousInspections = [...prev];
-      return prev.filter(i => i.siteId !== siteId);
-    });
-    
-    setCurrentSite(prev => prev?.id === siteId ? null : prev);
-    setCurrentInspection(prev => prev?.siteId === siteId ? null : prev);
-
+    if (!confirm("【警告】この現場自体を完全に削除しますか？")) return;
     try {
       await api.deleteSite(siteId);
-      // Optional: Refresh from server to stay in sync
-      const [sitesData, inspectionsData] = await Promise.all([
-        api.getSites(),
-        api.getInspections()
-      ]);
-      setSites(sitesData);
-      setInspections(inspectionsData);
+      await loadInitialData();
+      if (currentSite?.id === siteId) {
+        setCurrentSite(null);
+        setCurrentInspection(null);
+      }
     } catch (err) {
       console.error("Delete site error:", err);
-      // Rollback on error
-      if (previousSites.length > 0) setSites(previousSites);
-      if (previousInspections.length > 0) setInspections(previousInspections);
-      alert("現場の削除に失敗しました。");
     }
   };
 
   const handleDeleteInspection = async (e: React.MouseEvent, inspectionId: number) => {
-    if (!confirm("この点検記録（点検表）を削除しますか？")) return;
-    
-    let previousInspections: Inspection[] = [];
-    
-    // Immediate UI update
-    setInspections(prev => {
-      previousInspections = [...prev];
-      return prev.filter(i => i.id !== inspectionId);
-    });
-    
-    setCurrentInspection(prev => prev?.id === inspectionId ? null : prev);
-
+    if (!confirm("この点検記録を削除しますか？")) return;
     try {
       await api.deleteInspection(inspectionId);
-      const inspectionsData = await api.getInspections();
-      setInspections(inspectionsData);
+      await loadInitialData();
+      if (currentInspection?.id === inspectionId) {
+        setCurrentInspection(null);
+      }
     } catch (err) {
       console.error("Delete inspection error:", err);
-      if (previousInspections.length > 0) setInspections(previousInspections);
-      alert("点検記録の削除に失敗しました。");
-    }
-  };
-
-  const autoSelectOrCreateInspection = async (siteId: number) => {
-    try {
-      const today = new Date().toLocaleDateString('sv-SE'); // YYYY-MM-DD
-      const siteInspections = await api.getInspections(siteId);
-      // Only reuse a draft if it's from today
-      const todayDraft = siteInspections.find(i => i.status === 'draft' && i.date === today);
-      
-      if (todayDraft) {
-        const detail = await api.getInspection(todayDraft.id);
-        setCurrentInspection(detail);
-      } else {
-        // Create new inspection for today
-        const newInsp = await api.createInspection({
-          siteId,
-          date: today,
-          status: 'draft',
-          templateVersion: 'R1.9'
-        });
-        const detail = await api.getInspection(newInsp.id);
-        setCurrentInspection(detail);
-      }
-      await loadInitialData();
-    } catch (err) {
-      console.error("Auto select/create inspection error:", err);
-    }
-  };
-
-  const handleFunctionCall = async (call: any) => {
-    const { name, args } = call;
-    console.log("Function Call:", name, args);
-
-    try {
-      switch (name) {
-        case "create_site":
-          const newSite = await api.createSite(args.siteName, args.address);
-          const siteObj = { id: newSite.id, name: args.siteName, address: args.address };
-          setCurrentSite(siteObj);
-          await autoSelectOrCreateInspection(newSite.id);
-          break;
-        case "list_sites":
-          await loadInitialData();
-          break;
-        case "select_site":
-          const sId = parseInt(args.siteId);
-          const selectedSite = sites.find(s => s.id === sId);
-          if (selectedSite) {
-            setCurrentSite(selectedSite);
-            await autoSelectOrCreateInspection(sId);
-          }
-          break;
-        case "attach_drawing_pdf":
-          await api.updateSite(parseInt(args.siteId), { drawingPdfId: args.pdfId });
-          await loadInitialData();
-          break;
-        case "create_inspection":
-          const inspData = {
-            siteId: parseInt(args.siteId),
-            date: args.inspectionDate,
-            inspectorName: args.inspectorName,
-            workerCount: args.workersCount,
-            workContent: args.workSummary,
-            templateVersion: args.templateVersion
-          };
-          const newInsp = await api.createInspection(inspData);
-          await loadInitialData();
-          const insp = await api.getInspection(newInsp.id);
-          setCurrentInspection(insp);
-          break;
-        case "list_inspections":
-          const siteInspections = await api.getInspections(parseInt(args.siteId));
-          setInspections(siteInspections);
-          break;
-        case "get_inspection_detail":
-          const detail = await api.getInspection(parseInt(args.inspectionId));
-          setCurrentInspection(detail);
-          break;
-        case "set_item_result":
-          await api.registerItemResult(parseInt(args.inspectionId), {
-            itemId: args.itemId,
-            rating: args.evaluation,
-            comment: args.comment
-          });
-          if (currentInspection?.id === parseInt(args.inspectionId)) {
-            const updated = await api.getInspection(parseInt(args.inspectionId));
-            setCurrentInspection(updated);
-          }
-          break;
-        case "attach_photo":
-          await api.registerItemResult(parseInt(args.inspectionId), {
-            itemId: args.itemId,
-            photoId: args.photoId,
-            photoCaption: args.caption
-          });
-          if (currentInspection?.id === parseInt(args.inspectionId)) {
-            const updated = await api.getInspection(parseInt(args.inspectionId));
-            setCurrentInspection(updated);
-          }
-          break;
-        case "set_overall_comment":
-          await api.updateInspection(parseInt(args.inspectionId), { overallComment: args.overallComment });
-          if (currentInspection?.id === parseInt(args.inspectionId)) {
-            const updated = await api.getInspection(parseInt(args.inspectionId));
-            setCurrentInspection(updated);
-          }
-          break;
-        case "calculate_score":
-          // Simulation: Calculate score based on ratings
-          if (currentInspection) {
-            const items = currentInspection.items || [];
-            const xCount = items.filter(i => i.rating === '×' || i.rating === '✕').length;
-            const deltaCount = items.filter(i => i.rating === '△').length;
-            const score = Math.max(0, 100 - (xCount * 10) - (deltaCount * 5));
-            const rank = score >= 90 ? 'A' : score >= 70 ? 'B' : 'C';
-            
-            await api.updateInspection(parseInt(args.inspectionId), { score, rank });
-            const updated = await api.getInspection(parseInt(args.inspectionId));
-            setCurrentInspection(updated);
-            alert(`計算完了: スコア ${score}点, ランク ${rank}`);
-          }
-          break;
-        case "export_pdf":
-          alert(`点検ID: ${args.inspectionId} のPDF出力を開始しました（用紙サイズ: ${args.paperSize || 'A4'}）`);
-          break;
-      }
-    } catch (err) {
-      console.error("Function execution error:", err);
     }
   };
 
   const selectInspection = async (id: number) => {
-    const insp = await api.getInspection(id);
-    setCurrentInspection(insp);
-    const site = sites.find(s => s.id === insp.siteId);
-    if (site) setCurrentSite(site);
-    setIsSidebarOpen(false);
+    try {
+      const insp = await api.getInspection(id);
+      setCurrentInspection(insp);
+      const site = sites.find(s => s.id === insp.siteId);
+      if (site) setCurrentSite(site);
+      setIsSidebarOpen(false);
+      setPinningForItem(null);
+      setIsDrawingFullView(false);
+    } catch (err: any) {
+      console.error("Select inspection error:", err);
+      alert("点検履歴の読み込みに失敗しました。");
+    }
   };
+
+  const siteDrawingUrl = currentSite?.drawingPdfId ? api.getFileUrl(currentSite.drawingPdfId) : null;
 
   return (
     <div className="flex h-screen bg-stone-50 text-stone-900 font-sans overflow-hidden">
-      {/* Sidebar */}
       <AnimatePresence>
         {isSidebarOpen && (
           <>
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
@@ -380,16 +338,16 @@ export default function App() {
               transition={{ type: "spring", damping: 25, stiffness: 200 }}
               className="fixed inset-y-0 left-0 w-72 bg-white border-r border-stone-200 z-50 lg:relative lg:translate-x-0 flex flex-col shadow-xl lg:shadow-none"
             >
-              <div className="p-4 border-bottom border-stone-100 flex justify-between items-center">
+              <div className="p-4 border-b border-stone-100 flex justify-between items-center">
                 <h2 className="font-bold text-lg flex items-center gap-2">
                   <ClipboardCheck className="w-5 h-5 text-emerald-600" />
                   点検履歴
                 </h2>
-                <button onClick={() => setIsSidebarOpen(false)} className="lg:hidden p-1 hover:bg-stone-100 rounded">
+                <button onClick={() => setIsSidebarOpen(false)} title="閉じる" className="lg:hidden p-1 hover:bg-stone-100 rounded">
                   <X className="w-5 h-5" />
                 </button>
               </div>
-              
+
               <div className="flex-1 overflow-y-auto p-2 space-y-2">
                 {inspections.map(insp => (
                   <div key={insp.id} className="relative group/item">
@@ -397,19 +355,14 @@ export default function App() {
                       onClick={() => selectInspection(insp.id)}
                       className={cn(
                         "w-full text-left p-3 rounded-xl transition-all border",
-                        currentInspection?.id === insp.id 
-                          ? "bg-emerald-50 border-emerald-200 shadow-sm" 
+                        currentInspection?.id === insp.id
+                          ? "bg-emerald-50 border-emerald-200 shadow-sm"
                           : "bg-white border-stone-100 hover:border-stone-300"
                       )}
                     >
                       <div className="text-xs text-stone-500 mb-1 flex justify-between">
                         <span>{insp.date}</span>
                         <div className="flex gap-1">
-                          {insp.rank && (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-stone-900 text-white">
-                              RANK {insp.rank}
-                            </span>
-                          )}
                           {insp.status === 'completed' && (
                             <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase bg-emerald-100 text-emerald-700">
                               完了
@@ -418,10 +371,6 @@ export default function App() {
                         </div>
                       </div>
                       <div className="font-medium text-sm line-clamp-1">{insp.siteName || '名称未設定'}</div>
-                      <div className="text-xs text-stone-400 flex items-center gap-1 mt-1">
-                        <MapPin className="w-3 h-3" />
-                        {insp.siteName}
-                      </div>
                     </button>
                     <button
                       onClick={(e) => {
@@ -429,49 +378,29 @@ export default function App() {
                         e.stopPropagation();
                         handleDeleteInspection(e, insp.id);
                       }}
-                      className="absolute right-2 bottom-2 p-2 text-stone-300 hover:text-red-500 sm:opacity-0 group-hover/item:opacity-100 transition-opacity z-20 bg-white/80 rounded-full shadow-sm"
-                      title="点検記録を削除"
+                      title="点検履歴を削除"
+                      className="absolute top-2 right-2 p-1.5 bg-white border border-stone-100 text-stone-300 hover:text-rose-600 hover:border-rose-100 rounded-lg opacity-0 group-hover/item:opacity-100 transition-all shadow-sm"
                     >
-                      <Trash2 className="w-4 h-4 pointer-events-none" />
+                      <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 ))}
-                
-                {inspections.length === 0 && (
-                  <div className="text-center py-10 text-stone-400 text-sm italic">
-                    履歴がありません
-                  </div>
-                )}
-              </div>
-              
-              <div className="p-4 border-t border-stone-100">
-                <button 
-                  onClick={() => {
-                    setCurrentInspection(null);
-                    setCurrentSite(null);
-                    setIsSidebarOpen(false);
-                  }}
-                  className="w-full py-2.5 bg-stone-900 text-white rounded-xl font-medium flex items-center justify-center gap-2 hover:bg-stone-800 transition-colors"
-                >
-                  <Plus className="w-4 h-4" />
-                  新規点検を開始
-                </button>
               </div>
             </motion.aside>
           </>
         )}
       </AnimatePresence>
 
-      {/* Main Content */}
       <main className="flex-1 flex flex-col relative h-full">
-        {/* Header */}
         <header className="h-16 bg-white border-b border-stone-200 flex items-center justify-between px-4 sticky top-0 z-30">
           <div className="flex items-center gap-3">
             {currentInspection ? (
-              <button 
+              <button
                 onClick={() => {
                   setCurrentInspection(null);
                   setCurrentSite(null);
+                  setPinningForItem(null);
+                  setIsDrawingFullView(false);
                 }}
                 className="p-2 hover:bg-stone-100 rounded-lg text-stone-600"
                 title="ホームに戻る"
@@ -479,40 +408,25 @@ export default function App() {
                 <ArrowLeft className="w-6 h-6" />
               </button>
             ) : (
-              <button 
+              <button
                 onClick={() => setIsSidebarOpen(true)}
                 className="p-2 hover:bg-stone-100 rounded-lg lg:hidden"
+                title="メニューを開く"
               >
                 <Menu className="w-6 h-6" />
               </button>
             )}
             <div>
-              <h1 className="font-bold text-stone-900 leading-tight">現場安全パトロール</h1>
+              <h1 className="font-bold text-stone-900 leading-tight">現場パトロール点検表</h1>
               <p className="text-[10px] text-stone-500 uppercase tracking-wider font-semibold">
                 {currentSite ? currentSite.name : '現場未選択'}
               </p>
             </div>
           </div>
-          
-          <div className="flex items-center gap-2">
-            {currentInspection && (
-              <button 
-                onClick={() => handleFunctionCall({ name: "export_pdf", args: { inspectionId: currentInspection.id } })}
-                className="p-2 text-stone-600 hover:bg-stone-100 rounded-lg"
-                title="PDF出力"
-              >
-                <FileText className="w-5 h-5" />
-              </button>
-            )}
-            <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-700 font-bold text-xs">
-              Y
-            </div>
-          </div>
+          <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-700 font-bold text-xs">Y</div>
         </header>
 
-        {/* Content Area */}
         <div className="flex-1 overflow-hidden flex flex-col">
-          {/* Inspection View */}
           <div className="flex-1 overflow-y-auto p-4 space-y-6 bg-stone-50">
             {!currentInspection ? (
               <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-4">
@@ -521,108 +435,76 @@ export default function App() {
                 </div>
                 <div>
                   <h3 className="text-xl font-bold text-stone-800">点検を開始しましょう</h3>
-                  <p className="text-stone-500 max-w-xs mx-auto mt-2">
-                    現場を選択するか、AIエージェントに「点検を始めたい」と伝えてください。
-                  </p>
+                  <p className="text-stone-500 max-w-xs mx-auto mt-2">現場を選択して点検を開始してください。</p>
                 </div>
-                
+
                 <div className="grid grid-cols-1 gap-3 w-full max-w-sm mt-4">
                   {sites.map(site => (
-                    <div key={site.id} className="relative group">
+                    <div key={site.id} className="relative group/site">
                       {editingSiteId === site.id ? (
-                        <div className="p-4 rounded-2xl border border-emerald-400 bg-white space-y-3">
-                          <div className="space-y-2">
-                            <div className="flex items-center gap-3">
-                              <MapPin className="w-5 h-5 text-emerald-500" />
-                              <input
-                                autoFocus
-                                type="text"
-                                className="flex-1 outline-none text-stone-800 font-medium"
-                                value={editSiteName}
-                                onChange={(e) => setEditSiteName(e.target.value)}
-                                placeholder="現場名"
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') handleUpdateSite(site.id);
-                                  if (e.key === 'Escape') setEditingSiteId(null);
-                                }}
-                              />
-                            </div>
-                            <div className="flex items-center gap-3">
-                              <User className="w-5 h-5 text-emerald-500" />
-                              <input
-                                type="text"
-                                className="flex-1 outline-none text-stone-800 font-medium"
-                                value={editSiteManager}
-                                onChange={(e) => setEditSiteManager(e.target.value)}
-                                placeholder="現場担当者"
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') handleUpdateSite(site.id);
-                                  if (e.key === 'Escape') setEditingSiteId(null);
-                                }}
-                              />
-                            </div>
+                        <div className="p-3 bg-white border border-emerald-400 rounded-2xl shadow-sm space-y-2">
+                          <VoiceInput
+                            autoFocus
+                            value={editSiteName}
+                            onChange={(e) => setEditSiteName(e.target.value)}
+                            className="w-full text-sm font-medium border-none p-0 focus:ring-0 outline-none"
+                            placeholder="現場名"
+                          />
+                          <VoiceInput
+                            value={editSiteManager}
+                            onChange={(e) => setEditSiteManager(e.target.value)}
+                            placeholder="現場担当者..."
+                            className="w-full text-xs text-stone-500 border-none p-0 focus:ring-0 outline-none"
+                          />
+                          <div className="flex items-center gap-2 pt-1">
+                            <FileUp className="w-3 h-3 text-emerald-500" />
+                            <button
+                              onClick={() => {
+                                const input = document.createElement('input');
+                                input.type = 'file';
+                                input.accept = 'application/pdf';
+                                input.onchange = (e: any) => {
+                                  const file = e.target.files?.[0];
+                                  if (!file) return;
+                                  const reader = new FileReader();
+                                  reader.onload = (ev) => setNewSiteDrawing(ev.target?.result as string);
+                                  reader.readAsDataURL(file);
+                                };
+                                input.click();
+                              }}
+                              className={cn(
+                                "text-[9px] px-2 py-1 rounded border border-dashed transition-all",
+                                newSiteDrawing ? "bg-emerald-50 border-emerald-300 text-emerald-700" : "bg-stone-50 border-stone-200 text-stone-500"
+                              )}
+                              title="図面PDFをアップロード"
+                            >
+                              {newSiteDrawing ? "図面更新待機中" : "図面を変更（任意）"}
+                            </button>
                           </div>
                           <div className="flex gap-2">
-                            <button
-                              onClick={() => handleUpdateSite(site.id)}
-                              className="flex-1 bg-emerald-600 text-white py-2 rounded-xl font-bold text-sm"
-                            >
-                              保存
-                            </button>
-                            <button
-                              onClick={() => setEditingSiteId(null)}
-                              className="flex-1 bg-stone-100 text-stone-600 py-2 rounded-xl font-bold text-sm"
-                            >
-                              キャンセル
-                            </button>
+                            <button onClick={() => handleUpdateSite(site.id)} className="flex-1 bg-emerald-600 text-white text-[10px] font-bold py-1.5 rounded-lg" title="保存">保存</button>
+                            <button onClick={() => { setEditingSiteId(null); setNewSiteDrawing(null); }} className="flex-1 bg-stone-100 text-stone-600 text-[10px] font-bold py-1.5 rounded-lg" title="中止">中止</button>
                           </div>
                         </div>
                       ) : (
                         <>
                           <button
-                            onClick={() => {
-                              setCurrentSite(site);
-                              autoSelectOrCreateInspection(site.id);
-                            }}
-                            className={cn(
-                              "w-full p-4 rounded-2xl border text-left transition-all flex items-center justify-between",
-                              currentSite?.id === site.id 
-                                ? "bg-emerald-600 border-emerald-600 text-white shadow-lg shadow-emerald-200" 
-                                : "bg-white border-stone-200 hover:border-emerald-400"
-                            )}
+                            onClick={() => setViewingSiteHistory(site)}
+                            className="w-full p-4 rounded-2xl border border-stone-200 bg-white hover:border-emerald-400 text-left flex items-center gap-4 group"
+                            title="履歴・点検開始"
                           >
-                            <div className="flex items-center gap-3">
-                              <MapPin className={cn("w-5 h-5", currentSite?.id === site.id ? "text-emerald-200" : "text-stone-400")} />
-                              <span className="font-medium">{site.name}</span>
+                            <div className="w-10 h-10 rounded-xl bg-stone-50 flex items-center justify-center text-stone-400 group-hover:bg-emerald-50 group-hover:text-emerald-500 transition-colors">
+                              <MapPin className="w-5 h-5" />
                             </div>
-                            <ChevronRight className={cn("w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity", currentSite?.id === site.id && "opacity-100")} />
+                            <div className="flex-1">
+                              <div className="font-bold text-stone-800 leading-tight">{site.name}</div>
+                              <div className="text-xs text-stone-500">{site.managerName || '担当者未設定'}</div>
+                            </div>
+                            <ChevronRight className="w-4 h-4 text-stone-300 group-hover:text-emerald-400 group-hover:translate-x-1 transition-all" />
                           </button>
-                          
-                          <div className="absolute -right-1 -top-1 flex gap-1 z-20">
-                            <button
-                              onClick={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                setEditingSiteId(site.id);
-                                setEditSiteName(site.name);
-                                setEditSiteManager(site.managerName || "");
-                              }}
-                              className="p-2 bg-white border border-stone-200 rounded-full text-stone-400 hover:text-emerald-600 hover:border-emerald-200 shadow-sm transition-all"
-                              title="現場名を編集"
-                            >
-                              <Edit2 className="w-3.5 h-3.5 pointer-events-none" />
-                            </button>
-                            <button
-                              onClick={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                handleDeleteSite(e, site.id);
-                              }}
-                              className="p-2.5 bg-white border border-stone-200 rounded-full text-stone-400 hover:text-red-600 hover:border-red-200 shadow-md transition-all active:scale-95"
-                              title="現場を完全に削除"
-                            >
-                              <Trash2 className="w-4 h-4 pointer-events-none" />
-                            </button>
+                          <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover/site:opacity-100 transition-opacity">
+                            <button onClick={() => { setEditingSiteId(site.id); setEditSiteName(site.name); setEditSiteManager(site.managerName || ""); }} className="p-1.5 bg-white border border-stone-200 rounded-lg text-stone-400 hover:text-emerald-600" title="編集"><Edit2 className="w-3 h-3" /></button>
+                            <button onClick={(e) => handleDeleteSite(e, site.id)} className="p-1.5 bg-white border border-stone-200 rounded-lg text-stone-400 hover:text-rose-600" title="削除"><Trash2 className="w-3 h-3" /></button>
                           </div>
                         </>
                       )}
@@ -630,260 +512,667 @@ export default function App() {
                   ))}
 
                   {isAddingSite ? (
-                    <div className="p-4 rounded-2xl border border-emerald-400 bg-white space-y-3">
+                    <div className="p-4 rounded-2xl border border-emerald-400 bg-white space-y-3 animate-in fade-in slide-in-from-top-2">
                       <div className="space-y-2">
                         <div className="flex items-center gap-3">
                           <MapPin className="w-5 h-5 text-emerald-500" />
-                          <input
+                          <VoiceInput
                             autoFocus
-                            type="text"
                             placeholder="新しい現場名を入力..."
                             className="flex-1 outline-none text-stone-800 font-medium"
                             value={newSiteName}
                             onChange={(e) => setNewSiteName(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') handleCreateSite();
-                              if (e.key === 'Escape') setIsAddingSite(false);
-                            }}
                           />
                         </div>
                         <div className="flex items-center gap-3">
                           <User className="w-5 h-5 text-emerald-500" />
-                          <input
-                            type="text"
+                          <VoiceInput
                             placeholder="現場担当者名を入力..."
                             className="flex-1 outline-none text-stone-800 font-medium"
                             value={newSiteManager}
                             onChange={(e) => setNewSiteManager(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') handleCreateSite();
-                              if (e.key === 'Escape') setIsAddingSite(false);
-                            }}
                           />
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <FileUp className="w-5 h-5 text-emerald-500" />
+                          <button
+                            onClick={() => {
+                              const input = document.createElement('input');
+                              input.type = 'file';
+                              input.accept = 'application/pdf';
+                              input.onchange = (e: any) => {
+                                const file = e.target.files?.[0];
+                                if (!file) return;
+                                const reader = new FileReader();
+                                reader.onload = (ev) => setNewSiteDrawing(ev.target?.result as string);
+                                reader.readAsDataURL(file);
+                              };
+                              input.click();
+                            }}
+                            className={cn(
+                              "text-xs px-3 py-1.5 rounded-lg border border-dashed transition-all",
+                              newSiteDrawing ? "bg-emerald-50 border-emerald-300 text-emerald-700" : "bg-stone-50 border-stone-200 text-stone-500 hover:border-emerald-200"
+                            )}
+                            title="図面PDFを選択"
+                          >
+                            {newSiteDrawing ? "図面PDF添付済み" : "図面PDFを添付（任意）"}
+                          </button>
                         </div>
                       </div>
                       <div className="flex gap-2">
-                        <button
-                          onClick={handleCreateSite}
-                          className="flex-1 bg-emerald-600 text-white py-2 rounded-xl font-bold text-sm"
-                        >
-                          追加
-                        </button>
-                        <button
-                          onClick={() => setIsAddingSite(false)}
-                          className="flex-1 bg-stone-100 text-stone-600 py-2 rounded-xl font-bold text-sm"
-                        >
-                          キャンセル
-                        </button>
+                        <button onClick={handleCreateSite} className="flex-1 bg-emerald-600 text-white py-2 rounded-xl font-bold text-sm" title="現場を作成">追加</button>
+                        <button onClick={() => setIsAddingSite(false)} className="flex-1 bg-stone-100 text-stone-600 py-2 rounded-xl font-bold text-sm" title="キャンセル">中止</button>
                       </div>
                     </div>
                   ) : (
-                    <button
-                      onClick={() => setIsAddingSite(true)}
-                      className="w-full p-4 rounded-2xl border border-dashed border-stone-300 text-stone-400 hover:border-emerald-400 hover:text-emerald-600 hover:bg-emerald-50 transition-all flex items-center justify-center gap-2"
-                    >
+                    <button onClick={() => setIsAddingSite(true)} className="w-full p-4 rounded-2xl border border-dashed border-stone-300 text-stone-400 hover:border-emerald-400 hover:text-emerald-600 hover:bg-emerald-50 transition-all flex items-center justify-center gap-2" title="新規現場登録">
                       <Plus className="w-5 h-5" />
                       <span className="font-medium">新しい現場を追加</span>
                     </button>
                   )}
                 </div>
+
+                {viewingSiteHistory && (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
+                  >
+                    <section className="bg-white rounded-3xl p-6 border border-stone-200 shadow-2xl max-w-md w-full space-y-6 relative overflow-hidden">
+                      <div className="absolute top-0 left-0 w-full h-1.5 bg-emerald-500" />
+                      
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 bg-emerald-50 rounded-xl flex items-center justify-center text-emerald-600">
+                            <MapPin className="w-5 h-5" />
+                          </div>
+                          <div>
+                            <h3 className="text-xl font-bold text-stone-800">{viewingSiteHistory.name}</h3>
+                            <p className="text-sm text-stone-500">{viewingSiteHistory.managerName || '担当者未設定'}</p>
+                          </div>
+                        </div>
+                        <button onClick={() => setViewingSiteHistory(null)} className="p-2 hover:bg-stone-100 rounded-full text-stone-400">
+                          <X className="w-5 h-5" />
+                        </button>
+                      </div>
+
+                      <div className="space-y-3">
+                        <h4 className="text-xs font-bold text-stone-400 uppercase tracking-widest px-1">過去の点検記録</h4>
+                        <div className="grid gap-2 max-h-[40vh] overflow-y-auto pr-1 custom-scrollbar">
+                          {inspections.filter(i => i.siteId === viewingSiteHistory.id).length > 0 ? (
+                            inspections.filter(i => i.siteId === viewingSiteHistory.id).map(insp => (
+                              <button
+                                key={insp.id}
+                                onClick={() => {
+                                  selectInspection(insp.id);
+                                  setViewingSiteHistory(null);
+                                }}
+                                className="w-full text-left p-4 rounded-2xl bg-stone-50 hover:bg-emerald-50 border border-stone-100 hover:border-emerald-200 transition-all group flex items-center justify-between"
+                              >
+                                <div className="flex items-center gap-4">
+                                  <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center text-stone-400 group-hover:text-emerald-500 shadow-sm transition-colors">
+                                    <Calendar className="w-4 h-4" />
+                                  </div>
+                                  <div>
+                                    <div className="font-bold text-stone-800">{insp.date}</div>
+                                    <div className="text-[10px] font-bold text-stone-500 uppercase tracking-wider flex items-center gap-1.5">
+                                      {insp.status === 'completed' ? (
+                                        <>
+                                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                                          完了
+                                        </>
+                                      ) : (
+                                        <>
+                                          <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                                          点検中
+                                        </>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    onClick={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      handleDeleteInspection(e, insp.id);
+                                    }}
+                                    className="p-2 bg-white hover:bg-rose-50 border border-stone-100 hover:border-rose-100 text-stone-300 hover:text-rose-600 rounded-xl transition-all shadow-sm group/del"
+                                    title="この履歴を削除"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                  <ChevronRight className="w-4 h-4 text-stone-300 group-hover:text-emerald-400 transition-transform group-hover:translate-x-0.5" />
+                                </div>
+                              </button>
+                            ))
+                          ) : (
+                            <div className="text-center py-8 text-stone-400 bg-stone-50 rounded-2xl border border-dashed border-stone-200">
+                              履歴がありません
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={async () => {
+                          const newInsp = await api.createInspection({ 
+                            siteId: viewingSiteHistory.id, 
+                            date: new Date().toISOString().split('T')[0], 
+                            status: 'draft' 
+                          });
+                          await loadInitialData();
+                          selectInspection(newInsp.id);
+                          setViewingSiteHistory(null);
+                        }}
+                        className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-emerald-700 transition-all shadow-lg mt-2"
+                      >
+                        <Plus className="w-5 h-5" />
+                        新規点検を開始する
+                      </button>
+                    </section>
+                  </motion.div>
+                )}
               </div>
             ) : (
-              <motion.div 
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="space-y-6 max-w-3xl mx-auto"
-              >
+              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-6 max-w-3xl mx-auto">
                 {/* Header Info Card */}
                 <section className="bg-white rounded-2xl p-5 border border-stone-200 shadow-sm space-y-4">
-                  <div className="flex justify-between items-start">
-                    <h3 className="font-bold text-lg text-stone-800 flex items-center gap-2">
-                      <FileText className="w-5 h-5 text-stone-400" />
-                      点検基本情報
-                    </h3>
-                    <span className="px-2 py-1 bg-stone-100 rounded text-[10px] font-bold text-stone-600 uppercase">
-                      ID: {currentInspection.id}
-                    </span>
-                  </div>
-                  
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                     <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider">現場担当者</label>
-                      <div className="w-full bg-stone-50 border-none rounded-lg px-2 py-1 text-sm font-medium text-stone-600">
-                        {currentSite?.managerName || '未設定'}
-                      </div>
+                      <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider">現場名</label>
+                      <VoiceInput value={currentSite?.name || ''} onChange={(e) => currentSite && handleUpdateSiteSimple(currentSite.id, { name: e.target.value })} className="w-full bg-stone-50 border-none rounded-lg px-2 py-1 text-sm font-medium" placeholder="現場名" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider">担当者</label>
+                      <VoiceInput value={currentSite?.managerName || ''} onChange={(e) => currentSite && handleUpdateSiteSimple(currentSite.id, { managerName: e.target.value })} className="w-full bg-stone-50 border-none rounded-lg px-2 py-1 text-sm font-medium" placeholder="担当者" />
                     </div>
                     <div className="space-y-1">
                       <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider">点検日</label>
                       <input 
-                        type="date"
-                        value={currentInspection.date || ''}
-                        onChange={(e) => handleManualHeaderUpdate({ date: e.target.value })}
-                        className="w-full bg-stone-50 border-none rounded-lg px-2 py-1 text-sm font-medium focus:ring-1 focus:ring-emerald-500 outline-none"
+                        type="date" 
+                        value={currentInspection.date || ''} 
+                        onChange={(e) => handleManualHeaderUpdate({ date: e.target.value })} 
+                        className="w-full bg-stone-50 border-none rounded-lg px-2 py-1 text-sm font-medium focus:ring-2 focus:ring-emerald-500 outline-none" 
                       />
                     </div>
                     <div className="space-y-1">
                       <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider">点検者</label>
-                      <input 
-                        type="text"
-                        value={currentInspection.inspectorName || ''}
-                        onChange={(e) => handleManualHeaderUpdate({ inspectorName: e.target.value })}
-                        className="w-full bg-stone-50 border-none rounded-lg px-2 py-1 text-sm font-medium focus:ring-1 focus:ring-emerald-500 outline-none"
-                        placeholder="氏名を入力"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider">労働者数</label>
-                      <input 
-                        type="number"
-                        value={currentInspection.workerCount || 0}
-                        onChange={(e) => handleManualHeaderUpdate({ workerCount: parseInt(e.target.value) || 0 })}
-                        className="w-full bg-stone-50 border-none rounded-lg px-2 py-1 text-sm font-medium focus:ring-1 focus:ring-emerald-500 outline-none"
-                      />
+                      <VoiceInput value={currentInspection.inspectorName || ''} onChange={(e) => handleManualHeaderUpdate({ inspectorName: e.target.value })} className="w-full bg-stone-50 border-none rounded-lg px-2 py-1 text-sm font-medium" placeholder="点検者名" />
                     </div>
                   </div>
-                  
-                  <div className="space-y-1 pt-2 border-t border-stone-50">
-                    <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider">作業内容</label>
-                    <textarea 
-                      value={currentInspection.workContent || ''}
-                      onChange={(e) => handleManualHeaderUpdate({ workContent: e.target.value })}
-                      className="w-full bg-stone-50 border-none rounded-xl px-3 py-2 text-sm text-stone-600 leading-relaxed focus:ring-1 focus:ring-emerald-500 outline-none min-h-[60px]"
-                      placeholder="本日の主な作業内容を入力..."
-                    />
-                  </div>
+                </section>
 
-                  {currentInspection.rank && (
-                    <div className="pt-4 border-t border-stone-100 flex gap-6">
-                      <div className="space-y-1">
-                        <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider">ランク</label>
-                        <div className="text-2xl font-black text-emerald-600">{currentInspection.rank}</div>
-                      </div>
+                {/* Drawing & Pinning */}
+                {currentSite?.drawingPdfId && (
+                  <section className="bg-emerald-50 rounded-2xl p-5 border border-emerald-100 shadow-sm space-y-4">
+                    <div className="flex justify-between items-center">
+                      <label className="text-[10px] font-bold text-emerald-600 uppercase flex items-center gap-1"><Pin className="w-3 h-3" />図面・配置指摘</label>
+                      <button 
+                        onClick={() => { setIsDrawingFullView(!isDrawingFullView); setPinningForItem(null); }} 
+                        className="flex items-center gap-2 px-5 py-2.5 bg-emerald-600 text-white rounded-xl text-xs font-bold shadow-md hover:bg-emerald-700 transition-all active:scale-95" 
+                        title="図面表示切り替え"
+                      >
+                        <Pin className="w-3.5 h-3.5" />
+                        {isDrawingFullView ? "図面を閉じる" : "図面を表示する"}
+                      </button>
                     </div>
-                  )}
-                </section>
+                      {isDrawingFullView && (
+                        <div className="fixed inset-0 z-[9999] bg-stone-100 flex flex-col">
+                          {/* 戻るボタン＆ヘッダー */}
+                          <div className="bg-white px-4 py-3 shadow-md border-b flex items-center justify-between z-[10000]">
+                            <button 
+                              onClick={() => { setIsDrawingFullView(false); setPinningForItem(null); }} 
+                              className="flex items-center gap-1.5 text-stone-700 font-bold hover:text-stone-900 bg-stone-100 hover:bg-stone-200 px-4 py-2.5 rounded-xl transition-all shadow-sm"
+                            >
+                              <ArrowLeft className="w-5 h-5" />
+                              戻る
+                            </button>
+                            <div className="hidden sm:flex text-sm font-bold text-stone-800 items-center justify-center gap-2 absolute left-1/2 -translate-x-1/2 pointer-events-none">
+                                <Pin className="w-4 h-4 text-emerald-600" />
+                                {currentSite?.name} - 現場図面
+                            </div>
+                            <div className="w-auto sm:w-[140px]" />
+                          </div>
 
-                {/* Overall Comment */}
-                <section className="bg-emerald-50 rounded-2xl p-5 border border-emerald-100 shadow-sm space-y-2">
-                  <h3 className="font-bold text-emerald-800 flex items-center gap-2 text-sm">
-                    <ClipboardCheck className="w-4 h-4" />
-                    総合所見
-                  </h3>
-                  <textarea 
-                    value={currentInspection.overallComment || ''}
-                    onChange={(e) => handleManualHeaderUpdate({ overallComment: e.target.value })}
-                    className="w-full bg-white/50 border-none rounded-xl px-3 py-2 text-sm text-emerald-700 leading-relaxed focus:ring-1 focus:ring-emerald-500 outline-none min-h-[80px]"
-                    placeholder="点検全体の所見を入力してください..."
-                  />
-                </section>
+                          {/* ガイドメッセージ */}
+                          {pinningForItem ? (
+                            <div className="bg-emerald-600 text-white text-xs sm:text-sm py-2 px-4 shadow flex justify-between items-center z-[10000]">
+                              <span className="font-bold">【対象】{INSPECTION_ITEMS.find(i => i.id === pinningForItem)?.label} の位置をタップ</span>
+                              <button onClick={() => setPinningForItem(null)} className="bg-white/20 hover:bg-white/30 rounded px-3 py-1 text-xs font-bold" title="キャンセル">キャンセル</button>
+                            </div>
+                          ) : (
+                            currentInspection.status !== 'completed' && (
+                              <div className="bg-emerald-50 text-emerald-800 text-[11px] sm:text-xs py-2 px-4 shadow-sm flex justify-center items-center z-[10000] border-b border-emerald-100">
+                                <span className="font-bold">図面内をタップするとピンを立てて指摘を作成できます</span>
+                              </div>
+                            )
+                          )}
 
-                {/* Inspection Items */}
+                          {/* ビューワ本体（全画面） */}
+                          <div className="flex-1 w-full relative overflow-hidden p-0 sm:p-4">
+                            <DrawingViewer
+                              className="w-full h-full overflow-auto bg-white relative sm:border sm:border-stone-200 sm:rounded-2xl sm:shadow-xl"
+                              fileUrl={siteDrawingUrl || ""}
+                              markers={(() => {
+                                const allMarkers: DrawingMarker[] = [];
+                                currentInspection.items?.forEach(item => {
+                                  if (item.markers) {
+                                    try {
+                                      const parsed = JSON.parse(item.markers);
+                                      const master = INSPECTION_ITEMS.find(m => m.id === item.itemId);
+                                      allMarkers.push(...parsed.map((p: any) => ({ ...p, itemId: item.itemId, label: p.label || master?.label?.substring(0, 1) || '?' })));
+                                    } catch (e) { }
+                                  }
+                                });
+                                return allMarkers;
+                              })()}
+                              onSelectMarker={(marker) => {
+                                if (marker.issuePhotoId || marker.description) {
+                                  setSelectedMarkerDetail(marker);
+                                  setIsActiveCorrecting(false);
+                                } else {
+                                  const itemId = (marker as any).itemId;
+                                  if (itemId) {
+                                    setIsDrawingFullView(false);
+                                    setTimeout(() => {
+                                      document.getElementById(`item-${itemId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                    }, 300);
+                                  }
+                                }
+                              }}
+                              onAddMarker={(markerData) => {
+                                const targetItemId = pinningForItem || 'custom-pins';
+                                setActiveMarkerInput({ markerData, targetItemId });
+                                setMarkerDescription("");
+                                setMarkerPhoto(null);
+                              }}
+                              onRemoveMarker={(id) => {
+                                if (!window.confirm("このピンを削除してもよろしいですか？")) return;
+                                currentInspection.items?.forEach(item => {
+                                  if (item.markers) {
+                                    try {
+                                      const parsed = JSON.parse(item.markers);
+                                      const filtered = parsed.filter((p: any) => p.id !== id);
+                                      if (filtered.length !== parsed.length) handleManualItemUpdate(item.itemId, { markers: JSON.stringify(filtered) });
+                                    } catch (e) { }
+                                  }
+                                });
+                              }}
+                              readOnly={currentInspection.status === 'completed'}
+                            />
+
+                            {/* Marker Detail Input Overlay */}
+                            <AnimatePresence>
+                              {activeMarkerInput && (
+                                <div className="absolute inset-0 z-[10001] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+                                  <motion.div 
+                                    initial={{ opacity: 0, scale: 0.9 }}
+                                    animate={{ opacity: 1, scale: 1 }}
+                                    exit={{ opacity: 0, scale: 0.9 }}
+                                    className="bg-white rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl flex flex-col"
+                                  >
+                                    <div className="bg-emerald-600 p-4 text-white flex justify-between items-center">
+                                      <h3 className="font-bold flex items-center gap-2">
+                                        <Pin className="w-5 h-5" />
+                                        指摘の追加
+                                      </h3>
+                                      <button onClick={() => setActiveMarkerInput(null)} className="p-1 hover:bg-white/20 rounded-full">
+                                        <X className="w-5 h-5" />
+                                      </button>
+                                    </div>
+
+                                    <div className="p-6 space-y-5">
+                                      <div className="space-y-1.5">
+                                        <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider">指摘内容・ラベル（ピンに表示）</label>
+                                        <VoiceTextarea 
+                                          autoFocus
+                                          value={markerDescription}
+                                          onChange={(e) => setMarkerDescription(e.target.value)}
+                                          placeholder="指摘内容を入力..."
+                                          className="w-full bg-stone-50 border-stone-100 rounded-xl px-4 py-3 text-base focus:ring-2 focus:ring-emerald-500 min-h-[100px]"
+                                          rows={3}
+                                        />
+                                      </div>
+
+                                      <div className="space-y-1.5">
+                                        <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider">現場写真</label>
+                                        <div 
+                                          onClick={() => {
+                                            const input = document.createElement('input');
+                                            input.type = 'file';
+                                            input.accept = 'image/*';
+                                            input.onchange = (e: any) => {
+                                              const file = e.target.files?.[0];
+                                              if (!file) return;
+                                              const reader = new FileReader();
+                                              reader.onload = (event) => {
+                                                const img = new Image();
+                                                img.onload = () => {
+                                                  const canvas = document.createElement('canvas');
+                                                  const MAX = 1000; // 解像度を少し上げつつ圧縮
+                                                  let w = img.width, h = img.height;
+                                                  if (w > h) { if (w > MAX) { h *= MAX / w; w = MAX; } } else { if (h > MAX) { w *= MAX / h; h = MAX; } }
+                                                  canvas.width = w; canvas.height = h;
+                                                  const ctx = canvas.getContext('2d');
+                                                  if (ctx) {
+                                                    ctx.imageSmoothingEnabled = true;
+                                                    ctx.imageSmoothingQuality = 'high';
+                                                    ctx.drawImage(img, 0, 0, w, h);
+                                                    setMarkerPhoto(canvas.toDataURL('image/jpeg', 0.6)); // 0.6まで圧縮して容量削減
+                                                  }
+                                                };
+                                                img.src = event.target?.result as string;
+                                              };
+                                              reader.readAsDataURL(file);
+                                            };
+                                            input.click();
+                                          }}
+                                          className={cn(
+                                            "w-full aspect-video rounded-2xl border-2 border-dashed flex flex-col items-center justify-center cursor-pointer transition-all overflow-hidden",
+                                            markerPhoto ? "border-emerald-300 bg-emerald-50" : "border-stone-200 bg-stone-50 hover:border-emerald-200"
+                                          )}
+                                        >
+                                          {markerPhoto ? (
+                                            <img src={markerPhoto} className="w-full h-full object-cover" alt="Selected" />
+                                          ) : (
+                                            <>
+                                              <Camera className="w-8 h-8 text-stone-300 mb-2" />
+                                              <span className="text-xs text-stone-400 font-medium">写真を撮影・選択</span>
+                                            </>
+                                          )}
+                                        </div>
+                                      </div>
+
+                                      <button
+                                        onClick={() => {
+                                          if (!activeMarkerInput) return;
+                                          const master = INSPECTION_ITEMS.find(m => m.id === activeMarkerInput.targetItemId);
+                                          const finalLabel = markerDescription.trim() || (master ? master.label.substring(0, 1) : "？");
+                                          
+                                          const item = currentInspection.items?.find(i => i.itemId === activeMarkerInput.targetItemId);
+                                          const existingMarkers: DrawingMarker[] = item?.markers ? JSON.parse(item.markers) : [];
+                                          const newMarker = { 
+                                            ...activeMarkerInput.markerData, 
+                                            id: Math.random().toString(36).substr(2, 9), 
+                                            label: finalLabel,
+                                            issuePhotoId: markerPhoto || undefined,
+                                            description: markerDescription
+                                          };
+                                          
+                                          handleManualItemUpdate(activeMarkerInput.targetItemId, { 
+                                            markers: JSON.stringify([...existingMarkers, newMarker]) 
+                                          });
+                                          
+                                          setActiveMarkerInput(null);
+                                          setPinningForItem(null);
+                                        }}
+                                        className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 shadow-lg"
+                                      >
+                                        完了
+                                      </button>
+                                    </div>
+                                  </motion.div>
+                                </div>
+                              )}
+                            </AnimatePresence>
+
+                            {/* Marker Detail View Overlay */}
+                            <AnimatePresence>
+                              {selectedMarkerDetail && (
+                                <div className="absolute inset-0 z-[10002] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+                                  <motion.div 
+                                    initial={{ opacity: 0, y: 20 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    exit={{ opacity: 0, y: 20 }}
+                                    className="bg-white rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl flex flex-col"
+                                  >
+                                    <div className="relative aspect-video bg-stone-100 cursor-zoom-in group">
+                                      {selectedMarkerDetail.issuePhotoId ? (
+                                        <img 
+                                          src={selectedMarkerDetail.issuePhotoId} 
+                                          className="w-full h-full object-cover group-hover:opacity-90 transition-opacity" 
+                                          alt="指摘写真" 
+                                          onClick={() => setIsPreviewingPhoto(selectedMarkerDetail.issuePhotoId!)}
+                                        />
+                                      ) : (
+                                        <div className="w-full h-full flex flex-col items-center justify-center text-stone-300">
+                                          <Camera className="w-12 h-12 mb-2" />
+                                          <span className="text-xs">写真なし</span>
+                                        </div>
+                                      )}
+                                      <button 
+                                        onClick={() => setSelectedMarkerDetail(null)}
+                                        className="absolute top-3 right-3 p-2 bg-black/40 hover:bg-black/60 text-white rounded-full backdrop-blur-md transition-all sm:opacity-0 sm:group-hover:opacity-100"
+                                      >
+                                        <X className="w-5 h-5" />
+                                      </button>
+                                      {selectedMarkerDetail.issuePhotoId && (
+                                        <div className="absolute bottom-3 left-3 bg-black/50 text-white text-[10px] font-bold px-2 py-1 rounded backdrop-blur-sm pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
+                                          <Camera className="w-3 h-3" />
+                                          タップで拡大表示
+                                        </div>
+                                      )}
+                                    </div>
+                                    
+                                    <div className="p-6 space-y-4">
+                                      {isActiveCorrecting ? (
+                                        <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 relative">
+                                          <div className="space-y-1.5">
+                                            <div className="flex items-center justify-between">
+                                              <label className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">処置内容の入力</label>
+                                              <button onClick={() => setIsActiveCorrecting(false)} className="p-1 hover:bg-stone-100 rounded-full text-stone-400 transition-all" title="入力をキャンセル">
+                                                <X className="w-4 h-4" />
+                                              </button>
+                                            </div>
+                                            <VoiceTextarea 
+                                              autoFocus
+                                              value={correctiveText}
+                                              onChange={(e) => setCorrectiveText(e.target.value)}
+                                              placeholder="どのような処置を行いましたか？"
+                                              className="w-full bg-stone-50 border-stone-100 rounded-xl px-4 py-3 text-base min-h-[100px]"
+                                              rows={3}
+                                            />
+                                          </div>
+                                          <div className="space-y-1.5">
+                                            <label className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">処置後の写真</label>
+                                            <div 
+                                              onClick={() => {
+                                                const input = document.createElement('input');
+                                                input.type = 'file';
+                                                input.accept = 'image/*';
+                                                input.onchange = (e: any) => {
+                                                  const file = e.target.files?.[0];
+                                                  if (!file) return;
+                                                  const reader = new FileReader();
+                                                  reader.onload = (event) => {
+                                                    const img = new Image();
+                                                    img.onload = () => {
+                                                      const canvas = document.createElement('canvas');
+                                                      const MAX = 1000;
+                                                      let w = img.width, h = img.height;
+                                                      if (w > h) { if (w > MAX) { h *= MAX / w; w = MAX; } } else { if (h > MAX) { w *= MAX / h; h = MAX; } }
+                                                      canvas.width = w; canvas.height = h;
+                                                      const ctx = canvas.getContext('2d');
+                                                      if (ctx) { ctx.drawImage(img, 0, 0, w, h); setCorrectivePhoto(canvas.toDataURL('image/jpeg', 0.6)); }
+                                                    };
+                                                    img.src = event.target?.result as string;
+                                                  };
+                                                  reader.readAsDataURL(file);
+                                                };
+                                                input.click();
+                                              }}
+                                              className={cn(
+                                                "w-full aspect-video rounded-2xl border-2 border-dashed flex flex-col items-center justify-center cursor-pointer transition-all overflow-hidden",
+                                                correctivePhoto ? "border-emerald-300 bg-emerald-50" : "border-stone-200 bg-stone-50"
+                                              )}
+                                            >
+                                              {correctivePhoto ? (
+                                                <img src={correctivePhoto} className="w-full h-full object-cover" alt="Corrective" />
+                                              ) : (
+                                                <Camera className="w-8 h-8 text-stone-300" />
+                                              )}
+                                            </div>
+                                          </div>
+                                          <button
+                                            onClick={() => {
+                                              handleUpdateMarker(selectedMarkerDetail.id, {
+                                                correctiveAction: correctiveText,
+                                                correctivePhotoId: correctivePhoto || undefined
+                                              });
+                                              setIsActiveCorrecting(false);
+                                              setSelectedMarkerDetail(null);
+                                              confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 }, colors: ['#10b981', '#34d399', '#6ee7b7'] });
+                                            }}
+                                            disabled={!correctiveText || !correctivePhoto}
+                                            className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
+                                          >
+                                            処置を完了する
+                                          </button>
+                                        </div>
+                                      ) : (
+                                        <>
+                                          <div>
+                                            <div className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest mb-1">指摘事項</div>
+                                            <h3 className="text-lg font-bold text-stone-800 leading-tight">
+                                              {selectedMarkerDetail.description || selectedMarkerDetail.label}
+                                            </h3>
+                                          </div>
+
+                                          {selectedMarkerDetail.correctiveAction && (
+                                            <div className="p-4 bg-emerald-50 rounded-2xl border border-emerald-100">
+                                              <div className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest mb-1 flex items-center gap-1">
+                                                <CheckCircle2 className="w-3 h-3" /> 実施済み処置
+                                              </div>
+                                              <p className="text-sm text-stone-700 font-medium">{selectedMarkerDetail.correctiveAction}</p>
+                                              {selectedMarkerDetail.correctivePhotoId && (
+                                                <button 
+                                                  onClick={() => setIsPreviewingPhoto(selectedMarkerDetail.correctivePhotoId!)}
+                                                  className="mt-2 w-full aspect-video rounded-xl overflow-hidden border border-emerald-200"
+                                                >
+                                                  <img src={selectedMarkerDetail.correctivePhotoId} className="w-full h-full object-cover" alt="処置写真" />
+                                                </button>
+                                              )}
+                                            </div>
+                                          )}
+
+                                          <div className="flex gap-2 pt-2">
+                                            <button
+                                              onClick={() => {
+                                                setCorrectiveText(selectedMarkerDetail.correctiveAction || "");
+                                                setCorrectivePhoto(selectedMarkerDetail.correctivePhotoId || null);
+                                                setIsActiveCorrecting(true);
+                                              }}
+                                              className="flex-1 py-3 bg-stone-100 text-stone-700 rounded-xl font-bold text-sm hover:bg-stone-200 flex items-center justify-center gap-2"
+                                            >
+                                              <Edit2 className="w-4 h-4" />
+                                              処置内容
+                                            </button>
+                                            <button
+                                              onClick={() => setSelectedMarkerDetail(null)}
+                                              className="flex-1 py-3 bg-emerald-600 text-white rounded-xl font-bold text-sm hover:bg-emerald-700 shadow-md"
+                                            >
+                                              閉じる
+                                            </button>
+                                          </div>
+                                        </>
+                                      )}
+                                    </div>
+                                  </motion.div>
+                                </div>
+                              )}
+                            </AnimatePresence>
+
+                            {/* Global Photo Preview Overlay */}
+                            <AnimatePresence>
+                              {isPreviewingPhoto && (
+                                <div 
+                                  className="fixed inset-0 z-[12000] bg-black/95 backdrop-blur-md flex items-center justify-center p-4 sm:p-8"
+                                  onClick={() => setIsPreviewingPhoto(null)}
+                                >
+                                  <motion.div
+                                    initial={{ opacity: 0, scale: 0.9 }}
+                                    animate={{ opacity: 1, scale: 1 }}
+                                    exit={{ opacity: 0, scale: 0.9 }}
+                                    className="relative max-w-5xl w-full h-full flex items-center justify-center"
+                                  >
+                                    <img 
+                                      src={isPreviewingPhoto} 
+                                      className="max-w-full max-h-full object-contain rounded-lg shadow-2xl" 
+                                      alt="プレビュー" 
+                                    />
+                                    <button 
+                                      onClick={() => setIsPreviewingPhoto(null)}
+                                      className="absolute top-0 right-0 sm:-top-10 sm:-right-10 p-3 bg-white/10 hover:bg-white/20 text-white rounded-full transition-all"
+                                      title="閉じる"
+                                    >
+                                      <X className="w-8 h-8" />
+                                    </button>
+                                  </motion.div>
+                                </div>
+                              )}
+                            </AnimatePresence>
+                          </div>
+                        </div>
+                      )}
+                  </section>
+                )}
+
+                {/* Items */}
                 <section className="space-y-3">
                   <h3 className="font-bold text-stone-800 px-1">点検項目</h3>
                   <div className="space-y-3">
                     {INSPECTION_ITEMS.map(itemMaster => {
                       const result = currentInspection.items?.find(i => i.itemId === itemMaster.id);
+                      const isActionNeeded = result?.rating === '✕' || result?.rating === '×';
                       return (
-                        <div 
-                          key={itemMaster.id}
-                          className={cn(
-                            "bg-white rounded-2xl p-4 border transition-all",
-                            result ? "border-stone-200" : "border-stone-100 opacity-60"
-                          )}
-                        >
+                        <div key={itemMaster.id} id={`item-${itemMaster.id}`} className={cn("bg-white rounded-2xl p-4 border transition-all", isActionNeeded ? "border-rose-200 bg-rose-50" : "border-stone-200")}>
                           <div className="flex justify-between items-start gap-4">
                             <div className="flex-1">
-                              <div className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest mb-1">
-                                {itemMaster.section}
-                              </div>
+                              <div className="text-[10px] font-bold text-emerald-600 uppercase mb-1">{itemMaster.section}</div>
                               <h4 className="font-bold text-stone-800">{itemMaster.label}</h4>
-                              {itemMaster.checkpoints && (
-                                <div className="flex flex-wrap gap-1.5 mt-1.5">
-                                  {itemMaster.checkpoints.map((cp, idx) => (
-                                    <span key={idx} className="text-[9px] px-1.5 py-0.5 bg-stone-100 text-stone-500 rounded border border-stone-200">
-                                      {cp}
-                                    </span>
-                                  ))}
-                                </div>
-                              )}
                             </div>
-                            
                             <div className="flex gap-1">
-                              {['〇', '△', '✕', '○', '×'].map(r => {
-                                const isSelected = result?.rating === r || (r === '〇' && result?.rating === '○') || (r === '✕' && result?.rating === '×');
-                                if (['○', '×'].includes(r)) return null; // Only show main symbols in UI
-                                
-                                return (
-                                  <button 
-                                    key={r}
-                                    type="button"
-                                    onClick={() => handleManualItemUpdate(itemMaster.id, r, result?.comment)}
-                                    className={cn(
-                                      "w-8 h-8 rounded-lg flex items-center justify-center text-sm font-bold border transition-colors",
-                                      isSelected 
-                                        ? r === '〇' ? "bg-emerald-500 border-emerald-500 text-white" :
-                                          r === '△' ? "bg-amber-500 border-amber-500 text-white" :
-                                          "bg-rose-500 border-rose-500 text-white"
-                                        : "bg-stone-50 border-stone-100 text-stone-300 hover:border-stone-300"
-                                    )}
-                                  >
-                                    {r === '〇' && <CheckCircle2 className="w-4 h-4" />}
-                                    {r === '△' && <AlertTriangle className="w-4 h-4" />}
-                                    {r === '✕' && <XCircle className="w-4 h-4" />}
-                                  </button>
-                                );
-                              })}
+                              <button
+                                onClick={() => handleManualItemUpdate(itemMaster.id, { rating: isActionNeeded ? '' : '✕' })}
+                                className={cn("px-3 py-1.5 rounded-lg text-xs font-bold border flex items-center gap-1.5", isActionNeeded ? "bg-rose-500 border-rose-500 text-white" : "bg-stone-50 border-stone-200 text-stone-500")}
+                                title="処置が必要としてマーク"
+                              >
+                                <AlertTriangle className="w-3.5 h-3.5" />処置が必要
+                              </button>
                             </div>
                           </div>
-                          
-                          <div className="mt-3 flex gap-2">
-                            <div className="flex-1 relative">
-                              <input 
-                                type="text"
-                                value={result?.comment || ''}
-                                onChange={(e) => handleManualItemUpdate(itemMaster.id, result?.rating, e.target.value, result?.photoId, result?.photoCaption)}
-                                placeholder="指摘内容を入力..."
-                                className="w-full bg-stone-50 border-none rounded-xl px-3 py-2 text-xs text-stone-600 focus:ring-1 focus:ring-emerald-500 outline-none"
-                              />
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => handlePhotoUpload(itemMaster.id, result?.rating, result?.comment)}
-                              className={cn(
-                                "p-2 rounded-xl border transition-colors",
-                                result?.photoId 
-                                  ? "bg-emerald-50 border-emerald-200 text-emerald-600" 
-                                  : "bg-stone-50 border-stone-100 text-stone-400 hover:border-stone-300"
-                              )}
-                              title="写真を添付"
-                            >
-                              <Camera className="w-4 h-4" />
-                            </button>
-                          </div>
-                          
-                          {result?.photoId && (
-                            <div className="mt-3 space-y-2">
-                              <div className="relative group aspect-video rounded-xl overflow-hidden border border-stone-200 bg-stone-100">
-                                <img 
-                                  src={result.photoId} 
-                                  alt="点検写真" 
-                                  className="w-full h-full object-cover"
-                                  referrerPolicy="no-referrer"
-                                />
-                                <button
-                                  onClick={() => handleManualItemUpdate(itemMaster.id, result.rating, result.comment, null as any)}
-                                  className="absolute top-2 right-2 p-1.5 bg-black/50 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
-                                >
-                                  <X className="w-3 h-3" />
-                                </button>
+
+                          {isActionNeeded && (
+                            <div className="mt-4 space-y-4 pt-3 border-t border-rose-100">
+                              <div className="space-y-1.5 bg-rose-50 p-3 rounded-xl border border-rose-100/50">
+                                <label className="text-[10px] font-bold text-rose-500 uppercase">指摘内容（状況）</label>
+                                <div className="flex gap-2">
+                                  <VoiceTextarea 
+                                    value={result?.comment || ''} 
+                                    onChange={(e) => handleManualItemUpdate(itemMaster.id, { comment: e.target.value })} 
+                                    placeholder="指摘内容を入力..." 
+                                    className="flex-1 bg-white border border-rose-100 rounded-lg px-3 py-2 text-base min-h-[80px]" 
+                                    rows={2}
+                                  />
+                                  <button type="button" onClick={() => handlePhotoUpload(itemMaster.id, result || {}, false)} className="p-2 rounded-lg bg-white border border-rose-100 text-stone-400" title="写真を撮る"><Camera className="w-4 h-4" /></button>
+                                </div>
+                                {result?.photoId && <img src={result.photoId} alt="指摘箇所写真" className="mt-2 rounded-lg border border-rose-200 aspect-video object-cover" />}
                               </div>
-                              <input 
-                                type="text"
-                                value={result.photoCaption || ''}
-                                onChange={(e) => handleManualItemUpdate(itemMaster.id, result.rating, result.comment, result.photoId, e.target.value)}
-                                placeholder="写真の説明を入力..."
-                                className="w-full bg-transparent border-none p-0 text-[10px] text-stone-500 italic focus:ring-0 outline-none"
-                              />
+                              <div className="space-y-1.5 bg-emerald-50 p-3 rounded-xl border border-emerald-100/50">
+                                <label className="text-[10px] font-bold text-emerald-600 uppercase">是正処置</label>
+                                <div className="flex gap-2">
+                                  <VoiceTextarea 
+                                    value={result?.correctiveAction || ''} 
+                                    onChange={(e) => handleManualItemUpdate(itemMaster.id, { correctiveAction: e.target.value })} 
+                                    placeholder="是正処置を入力..." 
+                                    className="flex-1 bg-white border border-emerald-100 rounded-lg px-3 py-2 text-base min-h-[80px]" 
+                                    rows={2}
+                                  />
+                                  <button type="button" onClick={() => handlePhotoUpload(itemMaster.id, result || {}, true)} className="p-2 rounded-lg bg-white border border-emerald-100 text-stone-400" title="是正後の写真を撮る"><Camera className="w-4 h-4" /></button>
+                                </div>
+                                {result?.correctivePhotoId && <img src={result.correctivePhotoId} alt="是正後写真" className="mt-2 rounded-lg border border-emerald-200 aspect-video object-cover" />}
+                              </div>
                             </div>
                           )}
                         </div>
@@ -891,6 +1180,34 @@ export default function App() {
                     })}
                   </div>
                 </section>
+
+                <div className="flex flex-col gap-3 pt-6 pb-12">
+                  <button
+                    onClick={() => window.print()}
+                    className="w-full py-4 rounded-xl border-2 border-emerald-600 text-emerald-700 font-bold flex items-center justify-center gap-2 hover:bg-emerald-50 transition-all shadow-sm"
+                    title="PDFとして出力（印刷）"
+                  >
+                    <FileText className="w-5 h-5" />
+                    PDF・印刷用に出力する
+                  </button>
+                  <button
+                    onClick={async () => {
+                      if (currentInspection.status === 'completed') {
+                        await handleManualHeaderUpdate({ status: 'draft' });
+                      } else {
+                        await handleManualHeaderUpdate({ status: 'completed' });
+                        confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 } });
+                        await loadInitialData();
+                        setCurrentInspection(null);
+                        setCurrentSite(null);
+                      }
+                    }}
+                    className={cn("w-full py-4 rounded-xl font-bold flex items-center justify-center gap-2 transition-all", currentInspection.status === 'completed' ? "bg-stone-200 text-stone-600 hover:bg-stone-300" : "bg-emerald-600 text-white hover:bg-emerald-700 shadow-md")}
+                    title={currentInspection.status === 'completed' ? "編集中に戻す" : "点検を完了する"}
+                  >
+                    {currentInspection.status === 'completed' ? <><Edit2 className="w-5 h-5" />点検を再開する</> : <><CheckCircle2 className="w-5 h-5" />この点検を完了する</>}
+                  </button>
+                </div>
               </motion.div>
             )}
           </div>
