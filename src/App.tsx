@@ -624,7 +624,9 @@ export default function App() {
                                           if (item.markers) {
                                             try {
                                               const markers: DrawingMarker[] = JSON.parse(item.markers);
-                                              markersResolved = markers.every(m => m.correctiveAction && m.correctiveAction.trim() !== "");
+                                              markersResolved = markers.every(m => 
+                                                m.correctiveAction && m.correctiveAction.trim() !== "" && m.correctivePhotoId
+                                              );
                                             } catch (e) {}
                                           }
                                           
