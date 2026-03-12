@@ -618,28 +618,36 @@ export default function App() {
                                     <div className="font-bold text-stone-800">{insp.date}</div>
                                     <div className="text-[10px] font-bold text-stone-500 uppercase tracking-wider flex items-center gap-1.5">
                                       {(() => {
-                                        const isResolved = (insp.items || []).every(item => {
-                                          // Check if it's an issue (X) or has any markers
-                                          const isIssue = item.rating === '✕' || item.rating === '×';
-                                          let markersResolved = true;
+                                        const items = insp.items || [];
+                                        
+                                        // Collect all markers across all items
+                                        const allMarkers: DrawingMarker[] = [];
+                                        items.forEach(item => {
                                           if (item.markers) {
                                             try {
                                               const markers: DrawingMarker[] = JSON.parse(item.markers);
-                                              markersResolved = markers.every(m => 
-                                                m.correctiveAction && m.correctiveAction.trim() !== ""
-                                              );
+                                              allMarkers.push(...markers);
                                             } catch (e) {}
                                           }
-                                          
-                                          if (isIssue) {
-                                            // Must have corrective action and markers must be resolved
-                                            return item.correctiveAction && item.correctiveAction.trim() !== "" && markersResolved;
-                                          }
-                                          // If not an issue, just need markers to be resolved
-                                          return markersResolved;
                                         });
 
-                                        if (isResolved && (insp.items || []).length > 0) {
+                                        // Issue items: items marked with ✕
+                                        const issueItems = items.filter(item => item.rating === '✕' || item.rating === '×');
+                                        
+                                        // Need at least one issue or one marker to be "completed"
+                                        const hasAnyIssue = issueItems.length > 0 || allMarkers.length > 0;
+
+                                        // Check: all issue items have corrective action text
+                                        const issuesResolved = issueItems.every(item =>
+                                          item.correctiveAction && item.correctiveAction.trim() !== ""
+                                        );
+
+                                        // Check: all markers are green (have correctiveAction text)
+                                        const markersResolved = allMarkers.every(m =>
+                                          m.correctiveAction && m.correctiveAction.trim() !== ""
+                                        );
+
+                                        if (hasAnyIssue && issuesResolved && markersResolved) {
                                           return (
                                             <>
                                               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
