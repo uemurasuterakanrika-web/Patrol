@@ -943,7 +943,8 @@ export default function App() {
                                       )}
                                       <button 
                                         onClick={() => setSelectedMarkerDetail(null)}
-                                        className="absolute top-3 right-3 p-2 bg-black/40 hover:bg-black/60 text-white rounded-full backdrop-blur-md transition-all sm:opacity-0 sm:group-hover:opacity-100"
+                                        className="absolute top-3 right-3 p-2 bg-black/40 hover:bg-black/60 text-white rounded-full backdrop-blur-md transition-all z-20"
+                                        title="閉じる"
                                       >
                                         <X className="w-5 h-5" />
                                       </button>
