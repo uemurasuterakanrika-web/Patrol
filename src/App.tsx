@@ -925,8 +925,16 @@ export default function App() {
                                     initial={{ opacity: 0, y: 20 }}
                                     animate={{ opacity: 1, y: 0 }}
                                     exit={{ opacity: 0, y: 20 }}
-                                    className="bg-white rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl flex flex-col"
+                                    className="bg-white rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl flex flex-col relative"
                                   >
+                                    <button 
+                                      onClick={() => setSelectedMarkerDetail(null)}
+                                      className="absolute top-3 right-3 p-2 bg-black/40 hover:bg-black/60 text-white rounded-full backdrop-blur-md transition-all z-[10010]"
+                                      title="閉じる"
+                                    >
+                                      <X className="w-5 h-5" />
+                                    </button>
+
                                     <div className="relative aspect-video bg-stone-100 cursor-zoom-in group">
                                       {selectedMarkerDetail.issuePhotoId ? (
                                         <img 
@@ -941,13 +949,6 @@ export default function App() {
                                           <span className="text-xs">写真なし</span>
                                         </div>
                                       )}
-                                      <button 
-                                        onClick={() => setSelectedMarkerDetail(null)}
-                                        className="absolute top-3 right-3 p-2 bg-black/40 hover:bg-black/60 text-white rounded-full backdrop-blur-md transition-all z-20"
-                                        title="閉じる"
-                                      >
-                                        <X className="w-5 h-5" />
-                                      </button>
                                       {selectedMarkerDetail.issuePhotoId && (
                                         <div className="absolute bottom-3 left-3 bg-black/50 text-white text-[10px] font-bold px-2 py-1 rounded backdrop-blur-sm pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
                                           <Camera className="w-3 h-3" />
