@@ -618,23 +618,20 @@ export default function App() {
                                     <div className="text-[10px] font-bold text-stone-500 uppercase tracking-wider flex items-center gap-1.5">
                                       {(() => {
                                         const isResolved = (insp.items || []).every(item => {
-                                          // Check if it's an issue (X) or has any markers
-                                          const isIssue = item.rating === '✕' || item.rating === '×';
                                           let markersResolved = true;
                                           if (item.markers) {
                                             try {
                                               const markers: DrawingMarker[] = JSON.parse(item.markers);
-                                              markersResolved = markers.every(m => 
-                                                m.correctiveAction && m.correctiveAction.trim() !== "" && m.correctivePhotoId
-                                              );
+                                              // All markers must have text AND photo (these are the 'green' pins)
+                                              markersResolved = markers.every(m => m.correctiveAction?.trim() && m.correctivePhotoId);
                                             } catch (e) {}
                                           }
                                           
+                                          const isIssue = item.rating === '✕' || item.rating === '×';
                                           if (isIssue) {
-                                            // Must have corrective action and markers must be resolved
-                                            return item.correctiveAction && item.correctiveAction.trim() !== "" && markersResolved;
+                                            // Inspection issues only need the text (photo is optional)
+                                            return item.correctiveAction?.trim() && markersResolved;
                                           }
-                                          // If not an issue, just need markers to be resolved
                                           return markersResolved;
                                         });
 

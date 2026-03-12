@@ -479,7 +479,7 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                             }}
                         >
                             {(() => {
-                                const isResolved = marker.correctiveAction && marker.correctivePhotoId;
+                                const isResolved = marker.correctiveAction?.trim() && marker.correctivePhotoId;
                                 return (
                                     <div className={`
                                         flex items-center justify-center w-8 h-8 rounded-full shadow-lg border-2 border-white
