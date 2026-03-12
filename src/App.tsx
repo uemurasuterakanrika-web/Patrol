@@ -93,6 +93,43 @@ export default function App() {
       }
     }
   };
+
+  const getStatusDisplay = (insp: Inspection) => {
+    if (insp.status === 'completed') {
+      return { label: '完了', dot: 'bg-emerald-500', bg: 'bg-emerald-100 text-emerald-700' };
+    }
+
+    let hasIssue = false;
+    let allCorrected = true;
+
+    if (insp.items) {
+      for (const item of insp.items) {
+        const isActionNeeded = item.rating === '✕' || item.rating === '×';
+        if (isActionNeeded) {
+          hasIssue = true;
+          if (!item.correctiveAction) allCorrected = false;
+        }
+
+        if (item.markers) {
+          try {
+            const markers: DrawingMarker[] = JSON.parse(item.markers);
+            for (const m of markers) {
+              if (m.type === 'issue') {
+                hasIssue = true;
+                if (!m.correctiveAction) allCorrected = false;
+              }
+            }
+          } catch (e) {}
+        }
+      }
+    }
+
+    if (hasIssue && allCorrected) {
+      return { label: '処置完了', dot: 'bg-blue-500', bg: 'bg-blue-100 text-blue-700' };
+    }
+    return { label: '処置完了待ち', dot: 'bg-amber-500', bg: 'bg-amber-100 text-amber-700' };
+  };
+
   useEffect(() => {
     loadInitialData();
   }, []);
@@ -363,11 +400,14 @@ export default function App() {
                       <div className="text-xs text-stone-500 mb-1 flex justify-between">
                         <span>{insp.date}</span>
                         <div className="flex gap-1">
-                          {insp.status === 'completed' && (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase bg-emerald-100 text-emerald-700">
-                              完了
-                            </span>
-                          )}
+                          {(() => {
+                            const status = getStatusDisplay(insp);
+                            return (
+                              <span className={cn("px-1.5 py-0.5 rounded text-[10px] font-bold uppercase", status.bg)}>
+                                {status.label}
+                              </span>
+                            );
+                          })()}
                         </div>
                       </div>
                       <div className="font-medium text-sm line-clamp-1">{insp.siteName || '名称未設定'}</div>
@@ -616,17 +656,15 @@ export default function App() {
                                   <div>
                                     <div className="font-bold text-stone-800">{insp.date}</div>
                                     <div className="text-[10px] font-bold text-stone-500 uppercase tracking-wider flex items-center gap-1.5">
-                                      {insp.status === 'completed' ? (
-                                        <>
-                                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                                          完了
-                                        </>
-                                      ) : (
-                                        <>
-                                          <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-                                          点検中
-                                        </>
-                                      )}
+                                      {(() => {
+                                        const status = getStatusDisplay(insp);
+                                        return (
+                                          <>
+                                            <span className={cn("w-1.5 h-1.5 rounded-full", status.dot)} />
+                                            {status.label}
+                                          </>
+                                        );
+                                      })()}
                                     </div>
                                   </div>
                                 </div>
