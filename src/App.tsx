@@ -64,6 +64,7 @@ export default function App() {
   const [isActiveCorrecting, setIsActiveCorrecting] = useState(false);
   const [correctiveText, setCorrectiveText] = useState("");
   const [correctivePhoto, setCorrectivePhoto] = useState<string | null>(null);
+  const [inspectionCompleted, setInspectionCompleted] = useState(false);
 
   const handleUpdateMarker = (markerId: string, updates: Partial<DrawingMarker>) => {
     if (!currentInspection) return;
@@ -1151,9 +1152,28 @@ export default function App() {
 
                 {/* Items */}
                 <section className="space-y-3">
-                  <h3 className="font-bold text-stone-800 px-1">点検項目</h3>
+                  <div className="flex items-center justify-between px-1">
+                    <h3 className="font-bold text-stone-800">点検項目</h3>
+                    <button
+                      onClick={() => setInspectionCompleted(v => !v)}
+                      className={cn(
+                        "flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all",
+                        inspectionCompleted
+                          ? "bg-emerald-500 border-emerald-500 text-white shadow-sm"
+                          : "bg-white border-stone-200 text-stone-600 hover:border-emerald-400 hover:text-emerald-600"
+                      )}
+                      title={inspectionCompleted ? "全項目を表示する" : "点検完了（指摘なし項目を非表示）"}
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      {inspectionCompleted ? "全項目表示" : "点検完了"}
+                    </button>
+                  </div>
                   <div className="space-y-3">
-                    {INSPECTION_ITEMS.map(itemMaster => {
+                    {INSPECTION_ITEMS.filter(itemMaster => {
+                      if (!inspectionCompleted) return true;
+                      const result = currentInspection.items?.find(i => i.itemId === itemMaster.id);
+                      return result?.rating === '✕' || result?.rating === '×';
+                    }).map(itemMaster => {
                       const result = currentInspection.items?.find(i => i.itemId === itemMaster.id);
                       const isActionNeeded = result?.rating === '✕' || result?.rating === '×';
                       return (
