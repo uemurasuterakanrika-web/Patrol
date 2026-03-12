@@ -1194,23 +1194,6 @@ export default function App() {
                     <FileText className="w-5 h-5" />
                     PDF・印刷用に出力する
                   </button>
-                  <button
-                    onClick={async () => {
-                      if (currentInspection.status === 'completed') {
-                        await handleManualHeaderUpdate({ status: 'draft' });
-                      } else {
-                        await handleManualHeaderUpdate({ status: 'completed' });
-                        confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 } });
-                        await loadInitialData();
-                        setCurrentInspection(null);
-                        setCurrentSite(null);
-                      }
-                    }}
-                    className={cn("w-full py-4 rounded-xl font-bold flex items-center justify-center gap-2 transition-all", currentInspection.status === 'completed' ? "bg-stone-200 text-stone-600 hover:bg-stone-300" : "bg-emerald-600 text-white hover:bg-emerald-700 shadow-md")}
-                    title={currentInspection.status === 'completed' ? "編集中に戻す" : "点検を完了する"}
-                  >
-                    {currentInspection.status === 'completed' ? <><Edit2 className="w-5 h-5" />点検を再開する</> : <><CheckCircle2 className="w-5 h-5" />この点検を完了する</>}
-                  </button>
                 </div>
               </motion.div>
             )}
