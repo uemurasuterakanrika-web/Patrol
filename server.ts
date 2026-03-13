@@ -194,7 +194,38 @@ async function startServer() {
         params.push(siteId);
       }
       query += " ORDER BY i.date DESC";
-      const inspections = db.prepare(query).all(...params);
+      const inspections = db.prepare(query).all(...params) as any[];
+      
+      // For each inspection, add basic item info for status check without heavy Base64 images
+      for (const insp of inspections) {
+        const items = db.prepare(`
+          SELECT 
+            itemId, rating, correctiveAction, 
+            CASE WHEN correctivePhotoId IS NOT NULL AND correctivePhotoId != '' THEN 'exists' ELSE NULL END as correctivePhotoId,
+            markers
+          FROM inspection_items 
+          WHERE inspectionId = ?
+        `).all(insp.id) as any[];
+
+        // Clean markers JSON to remove heavy Base64 but keep status info
+        insp.items = items.map(it => {
+          if (it.markers) {
+            try {
+              const markers = JSON.parse(it.markers);
+              const cleanedMarkers = markers.map((m: any) => ({
+                id: m.id,
+                correctiveAction: m.correctiveAction,
+                correctivePhotoId: (m.correctivePhotoId && m.correctivePhotoId !== "") ? "exists" : undefined
+              }));
+              it.markers = JSON.stringify(cleanedMarkers);
+            } catch (e) {
+              it.markers = "[]";
+            }
+          }
+          return it;
+        });
+      }
+
       res.json(inspections);
     } catch (e) { next(e); }
   });

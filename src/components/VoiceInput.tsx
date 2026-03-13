@@ -94,9 +94,9 @@ export function VoiceInput({ value, onChange, className, ...props }: React.Input
                     type="button"
                     onClick={toggleListen}
                     className={cn(
-                        "absolute right-2 p-1.5 rounded-full transition-colors z-10",
+                        "absolute right-2 p-1.5 rounded-full z-10",
                         isListening
-                            ? "bg-rose-500 text-white animate-pulse"
+                            ? "bg-rose-500 text-white"
                             : "text-stone-400 hover:text-emerald-500 hover:bg-stone-100"
                     )}
                     title="音声入力"
@@ -192,9 +192,9 @@ export function VoiceTextarea({ value, onChange, className, ...props }: React.Te
                     type="button"
                     onClick={toggleListen}
                     className={cn(
-                        "absolute bottom-2 right-2 p-1.5 rounded-full transition-colors shadow-sm z-10",
+                        "absolute bottom-2 right-2 p-1.5 rounded-full shadow-sm z-10",
                         isListening
-                            ? "bg-rose-500 text-white animate-pulse"
+                            ? "bg-rose-500 text-white"
                             : "bg-white border border-stone-200 text-stone-400 hover:text-emerald-500 hover:bg-stone-50"
                     )}
                     title="音声入力"

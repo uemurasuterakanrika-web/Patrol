@@ -19,51 +19,229 @@
   @apply list-disc list-inside mb-2;
 }
 
+@media screen {
+  .print-only { display: none !important; }
+}
+
 @media print {
-  /* Hide UI elements */
-  aside, header, nav, .lg\:relative, button, .lucide {
-    display: none !important;
-  }
-  
-  .bg-stone-50 {
-    background-color: white !important;
-  }
-  
-  main {
-    position: static !important;
-    overflow: visible !important;
-    height: auto !important;
-  }
-  
-  .overflow-y-auto {
-    overflow: visible !important;
-    height: auto !important;
+  @page {
+    size: A4 portrait;
+    margin: 15mm 15mm;
   }
 
-  /* Reset layout for report */
-  .max-w-3xl {
-    max-width: 100% !important;
+  /* Force colors */
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  html, body {
+    height: auto !important;
+    overflow: visible !important;
     margin: 0 !important;
     padding: 0 !important;
   }
 
-  section {
-    break-inside: avoid;
-    border: 1px solid #e5e7eb !important;
-    margin-bottom: 2rem !important;
+  body {
+    background: white !important;
+    background-color: white !important;
+    font-family: "Noto Sans JP", "BIZ UDPGothic", "Hiragino Kaku Gothic ProN", sans-serif;
+    font-size: 9.8pt; /* PCと同等の密度を確保 */
+    line-height: 1.35;
+    /* モバイル・タブレットのレンダリング幅が狭くなるのを防ぐための固定幅設定 */
+    width: 100% !important;
+    min-width: 210mm !important; 
+    margin: 0 !important;
+    padding: 0 !important;
   }
 
-  img {
-    max-height: 400px;
-    object-fit: contain;
+  .no-print { 
+    display: none !important; 
+    height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+  }
+  
+  .print-only { 
+    display: block !important;
+    background-color: white !important;
+    width: 100% !important;
   }
 
-  .shadow-sm, .shadow-md, .shadow-xl {
-    box-shadow: none !important;
+  .report-page {
+    background-color: white !important;
+    width: 180mm !important; /* A4 210mm - (15mm * 2) */
+    margin: 0 auto !important;
+    padding: 0 !important;
+    box-sizing: border-box;
+    page-break-after: avoid !important;
   }
 
-  .rounded-2xl {
-    border-radius: 0 !important;
+  /* Title */
+  .report-page-title {
+    font-size: 17pt;
+    font-weight: 800;
+    text-align: center;
+    margin-bottom: 5mm;
+    padding-bottom: 2.5mm;
+    border-bottom: 1.8pt solid black;
+  }
+
+  /* Header Grid */
+  .report-header-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr; /* 均等に配置 */
+    gap: 3mm 10mm;
+    margin-bottom: 6mm;
+  }
+
+  .report-header-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.8mm;
+  }
+
+  .report-header-label {
+    font-size: 9.5pt;
+    font-weight: 900;
+  }
+
+  .report-header-value {
+    border-bottom: 0.8pt solid black;
+    height: 8.5mm;
+    display: flex;
+    align-items: center;
+    font-size: 10.5pt;
+    padding-left: 2mm;
+  }
+
+  /* Section Header */
+  .report-section-header {
+    background-color: #DEE6F7 !important;
+    padding: 2mm 4mm;
+    font-size: 12pt;
+    font-weight: 900;
+    margin-bottom: 3.5mm;
+    border-radius: 0.8mm;
+  }
+
+  /* Group Header */
+  .report-group-header {
+    background-color: #EBEBEB !important;
+    padding: 1.2mm 4mm;
+    font-size: 9.8pt;
+    font-weight: 900;
+    margin-bottom: 2.5mm;
+    display: inline-block;
+  }
+
+  /* Item Layout */
+  .report-item-box {
+    margin-bottom: 4.5mm;
+    page-break-inside: avoid;
+  }
+
+  .report-item-title {
+    font-size: 11pt;
+    font-weight: 900;
+    margin-bottom: 2mm;
+  }
+
+  .report-item-row {
+    display: flex;
+    align-items: flex-end;
+    margin-bottom: 1.5mm;
+  }
+
+  .report-item-label {
+    width: 38mm;
+    font-size: 9.5pt;
+    font-weight: 600;
+    color: #333;
+    padding-bottom: 0.5mm;
+  }
+
+  .report-item-value-line {
+    flex: 1;
+    border-bottom: 0.6pt solid #333;
+    min-height: 8.5mm;
+    display: flex;
+    align-items: center;
+    padding-bottom: 0.5mm;
+    font-size: 10.5pt;
+    padding-left: 1mm;
+  }
+
+  /* Image Layout */
+  .report-photo-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4mm;
+    margin-top: 5mm;
+  }
+
+  .report-photo-grid.cols-2 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .report-photo-container {
+    border: 0.8pt solid #eee;
+    padding: 0.8mm;
+    border-radius: 0.8mm;
+  }
+
+  .report-photo-container img {
+    width: 100%;
+    height: 3.2cm;
+    object-fit: cover;
+    border-radius: 0.4mm;
+  }
+
+  .report-photo-caption {
+    font-size: 7.5pt;
+    color: #666;
+    text-align: center;
+    margin-top: 0.5mm;
+  }
+
+  /* Drawing Print Styles */
+  .report-drawing-container {
+    position: relative;
+    width: 100%;
+    margin-top: 5mm;
+    border: 0.5pt solid #ccc;
+    background: #f9f9f9;
+  }
+
+  .report-drawing-image {
+    width: 100%;
+    display: block;
+  }
+
+  .report-drawing-pin {
+    position: absolute;
+    width: 6mm;
+    height: 6mm;
+    border-radius: 50%;
+    border: 0.4pt solid white;
+    box-shadow: 0 0.5mm 1mm rgba(0,0,0,0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 7pt;
+    font-weight: 900;
+    color: white;
+    transform: translate(-50%, -50%);
+  }
+
+  .report-drawing-pin.issue { background-color: #f43f5e !important; }
+  .report-drawing-pin.resolved { background-color: #10b981 !important; }
+
+  /* Page Break Control */
+  .page-break {
+    margin-top: 5mm;
+    page-break-before: auto;
+    page-break-after: avoid !important;
   }
 }
-
