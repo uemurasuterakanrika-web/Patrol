@@ -19,7 +19,8 @@ import {
   ArrowLeft,
   Edit2,
   FileUp,
-  Pin
+  Pin,
+  Filter
 } from "lucide-react";
 import * as pdfjs from 'pdfjs-dist';
 import { collection, onSnapshot, query, orderBy } from "firebase/firestore";
@@ -494,28 +495,11 @@ export default function App() {
                       <div className="text-xs text-stone-500 mb-1 flex justify-between">
                         <span>{insp.date}</span>
                         <div className="flex gap-1">
-                          {(() => {
-                            const items = insp.items || [];
-                            const allMarkers: DrawingMarker[] = [];
-                            items.forEach(item => {
-                              if (item.markers) {
-                                try { allMarkers.push(...JSON.parse(item.markers)); } catch (e) {}
-                              }
-                            });
-                            const issueItems = items.filter(item => item.rating === '✕' || item.rating === '×');
-                            
-                            // 指摘事項（×）の是正が完了しているか（テキスト入力あり）
-                            const issuesResolved = issueItems.every(item => item.correctiveAction && item.correctiveAction.trim() !== "");
-                            // マーカーの是正が完了しているか（テキスト ＋ 写真あり）
-                            const markersResolved = allMarkers.every(m => m.correctiveAction && m.correctiveAction.trim() !== "" && m.correctivePhotoId);
-                            
-                            const hasAnyIssue = issueItems.length > 0 || allMarkers.length > 0;
-
-                            if (hasAnyIssue && (!issuesResolved || !markersResolved)) {
-                              return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700">処置完了待ち</span>;
-                            }
-                            return <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-700">処置完了</span>;
-                          })()}
+                          {insp.status === 'completed' ? (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-700">処置完了</span>
+                          ) : (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700">処置完了報告待ち</span>
+                          )}
                         </div>
                       </div>
                       <div className="font-medium text-sm line-clamp-1">{insp.siteName || '名称未設定'}</div>
@@ -1308,17 +1292,38 @@ export default function App() {
                   <div className="flex items-center justify-between px-1">
                     <h3 className="font-bold text-stone-800">点検項目</h3>
                     <button
+                      onClick={async () => {
+                        const newStatus = currentInspection.status === 'completed' ? 'draft' : 'completed';
+                        if (newStatus === 'completed' && !confirm("点検を「完了報告」としてマークしますか？履歴で処置完了として表示されます。")) return;
+                        try {
+                          await api.updateInspection(currentInspection.id, { status: newStatus });
+                          setCurrentInspection({ ...currentInspection, status: newStatus });
+                        } catch (err) {
+                          console.error("Update inspection status error:", err);
+                        }
+                      }}
+                      className={cn(
+                        "flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-bold border transition-all shadow-sm",
+                        currentInspection.status === 'completed'
+                          ? "bg-emerald-600 border-emerald-600 text-white hover:bg-emerald-700"
+                          : "bg-white border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+                      )}
+                    >
+                      <CheckCircle2 className="w-4 h-4" />
+                      {currentInspection.status === 'completed' ? "報告済み" : "完了報告"}
+                    </button>
+                    <button
                       onClick={() => setInspectionCompleted(v => !v)}
                       className={cn(
                         "flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border",
                         inspectionCompleted
-                          ? "bg-emerald-500 border-emerald-500 text-white shadow-sm"
+                          ? "bg-stone-500 border-stone-500 text-white shadow-sm"
                           : "bg-white border-stone-200 text-stone-600 hover:border-emerald-400 hover:text-emerald-600"
                       )}
-                      title={inspectionCompleted ? "全項目を表示する" : "点検完了（指摘なし項目を非表示）"}
+                      title={inspectionCompleted ? "全項目を表示する" : "指摘箇所のみ表示"}
                     >
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      {inspectionCompleted ? "全項目表示" : "点検完了"}
+                      <Filter className="w-3.5 h-3.5" />
+                      {inspectionCompleted ? "全項目表示" : "指摘のみ表示"}
                     </button>
                   </div>
                   <div className="space-y-3">
