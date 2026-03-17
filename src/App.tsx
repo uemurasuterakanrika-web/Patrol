@@ -22,7 +22,8 @@ import {
   Pin
 } from "lucide-react";
 import * as pdfjs from 'pdfjs-dist';
-import { io } from "socket.io-client";
+import { collection, onSnapshot, query, orderBy } from "firebase/firestore";
+import { db } from "./firebase";
 import { api } from "./services/api";
 import { Site, Inspection, InspectionItem, DrawingMarker } from "./types";
 import { INSPECTION_ITEMS } from "./constants";
@@ -47,7 +48,7 @@ export default function App() {
   const [newSiteManager, setNewSiteManager] = useState("");
   const [newSiteDrawing, setNewSiteDrawing] = useState<string | null>(null);
   const [isCompressingPdf, setIsCompressingPdf] = useState(false);
-  const [editingSiteId, setEditingSiteId] = useState<number | null>(null);
+  const [editingSiteId, setEditingSiteId] = useState<string | null>(null);
   const [editSiteName, setEditSiteName] = useState("");
   const [editSiteManager, setEditSiteManager] = useState("");
   const [isDrawingFullView, setIsDrawingFullView] = useState(false);
@@ -190,33 +191,45 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const socket = io();
-    socket.on('dataUpdated', async (data) => {
-      const [sitesData, inspectionsData] = await Promise.all([
-        api.getSites(),
-        api.getInspections()
-      ]);
+    // Sites Listener
+    const qSites = query(collection(db, "sites"), orderBy("name"));
+    const unsubSites = onSnapshot(qSites, (snapshot) => {
+      const sitesData = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Site));
       setSites(sitesData);
-      setInspections(inspectionsData);
-
-      if (currentInspection && (
-        (data.type === 'inspections' && data.id == currentInspection.id) ||
-        (data.type === 'inspection_item' && data.id == currentInspection.id)
-      )) {
-        const updated = await api.getInspection(currentInspection.id);
-        setCurrentInspection(updated);
+      
+      // Update current site if it was updated
+      if (currentSite) {
+        const updated = sitesData.find(s => s.id === currentSite.id);
+        if (updated) setCurrentSite(updated);
       }
+    });
 
-      if (currentSite && data.type === 'sites' && data.id == currentSite.id) {
-        const updatedSite = sitesData.find(s => s.id === currentSite.id);
-        if (updatedSite) setCurrentSite(updatedSite);
+    // Inspections Listener
+    const qInspections = query(collection(db, "inspections"), orderBy("date", "desc"));
+    const unsubInspections = onSnapshot(qInspections, (snapshot) => {
+      const inspectionsData = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Inspection));
+      setInspections(inspectionsData);
+      
+      // Update current inspection if it was updated
+      if (currentInspection) {
+        // If we are looking at a specific inspection, we might need a separate listener for its subcollection (items)
+        // For now, we manually re-fetch if the doc itself changed
+        const updated = inspectionsData.find(i => i.id === currentInspection.id);
+        if (updated) {
+          // If items are in subcollection, we'd need another listener.
+          // For simplicity, let's trigger a detail fetch
+          api.getInspection(currentInspection.id).then(full => {
+             setCurrentInspection(full);
+          });
+        }
       }
     });
 
     return () => {
-      socket.disconnect();
+      unsubSites();
+      unsubInspections();
     };
-  }, [currentInspection, currentSite]);
+  }, [currentSite?.id, currentInspection?.id]); // Only re-setup if active IDs change
 
   const loadInitialData = async () => {
     const [sitesData, inspectionsData] = await Promise.all([
@@ -300,7 +313,7 @@ export default function App() {
     }
   };
 
-  const handleUpdateSiteSimple = async (id: number, updates: Partial<Site>) => {
+  const handleUpdateSiteSimple = async (id: string, updates: Partial<Site>) => {
     try {
       await api.updateSite(id, updates);
     } catch (err) {
@@ -316,7 +329,7 @@ export default function App() {
       if (newSiteDrawing) {
         console.log("Uploading PDF drawing...");
         const uploadRes = await api.uploadFile(newSiteDrawing);
-        drawingPdfId = Number(uploadRes.id);
+        drawingPdfId = uploadRes.id;
       }
 
       const finalName = newSiteName.trim().endsWith("新築工事") ? newSiteName.trim() : `${newSiteName.trim()} 新築工事`;
@@ -335,7 +348,7 @@ export default function App() {
     }
   };
 
-  const handleUpdateSite = async (siteId: number) => {
+  const handleUpdateSite = async (siteId: string) => {
     if (isUploading || !editSiteName.trim()) return;
     try {
       setIsUploading(true);
@@ -344,7 +357,7 @@ export default function App() {
       if (newSiteDrawing) {
         console.log("Updating PDF drawing...");
         const uploadRes = await api.uploadFile(newSiteDrawing);
-        drawingPdfId = Number(uploadRes.id);
+        drawingPdfId = uploadRes.id;
       }
 
       const finalName = editSiteName.trim().endsWith("新築工事") ? editSiteName.trim() : `${editSiteName.trim()} 新築工事`;
@@ -367,11 +380,10 @@ export default function App() {
     }
   };
 
-  const handleDeleteSite = async (e: React.MouseEvent, siteId: number) => {
+  const handleDeleteSite = async (e: React.MouseEvent, siteId: string) => {
     if (!confirm("【警告】この現場自体を完全に削除しますか？")) return;
     try {
       await api.deleteSite(siteId);
-      await loadInitialData();
       if (currentSite?.id === siteId) {
         setCurrentSite(null);
         setCurrentInspection(null);
@@ -381,11 +393,10 @@ export default function App() {
     }
   };
 
-  const handleDeleteInspection = async (e: React.MouseEvent, inspectionId: number) => {
+  const handleDeleteInspection = async (e: React.MouseEvent, inspectionId: string) => {
     if (!confirm("この点検記録を削除しますか？")) return;
     try {
       await api.deleteInspection(inspectionId);
-      await loadInitialData();
       if (currentInspection?.id === inspectionId) {
         setCurrentInspection(null);
       }
@@ -394,7 +405,7 @@ export default function App() {
     }
   };
 
-  const selectInspection = async (id: number) => {
+  const selectInspection = async (id: string) => {
     try {
       const insp = await api.getInspection(id);
       setCurrentInspection(insp);
@@ -842,6 +853,7 @@ export default function App() {
                           value={currentInspection.date || ''} 
                           onChange={(e) => handleManualHeaderUpdate({ date: e.target.value })} 
                           className="w-full bg-stone-50 border-none rounded-lg px-2 py-1 text-sm font-medium focus:ring-2 focus:ring-emerald-500 outline-none" 
+                          title="点検日"
                         />
                       </div>
                       <div className="space-y-1">

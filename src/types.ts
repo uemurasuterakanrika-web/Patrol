@@ -1,14 +1,14 @@
 export interface Site {
-  id: number;
+  id: string;
   name: string;
   address?: string;
   managerName?: string;
-  drawingPdfId?: number;
+  drawingPdfId?: string;
 }
 
 export interface Inspection {
-  id: number;
-  siteId: number;
+  id: string;
+  siteId: string;
   siteName?: string;
   date?: string;
   inspectorName?: string;
@@ -36,8 +36,8 @@ export interface DrawingMarker {
 }
 
 export interface InspectionItem {
-  id?: number;
-  inspectionId: number;
+  id?: string;
+  inspectionId: string;
   itemId: string;
   rating: '〇' | '△' | '✕' | '○' | '×' | '';
   comment?: string;
