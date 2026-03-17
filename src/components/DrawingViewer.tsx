@@ -316,6 +316,11 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
         if (!container) return;
 
         const handleTouchStart = (e: TouchEvent) => {
+            // 操作ボタン上でのタッチは無視する
+            if (e.target instanceof Element && e.target.closest('.pointer-events-auto') && !e.target.closest('.cursor-crosshair')) {
+                return;
+            }
+
             if (e.touches.length === 1) {
                 touchState.current.startX = e.touches[0].clientX;
                 touchState.current.startY = e.touches[0].clientY;
@@ -383,6 +388,11 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
         };
 
         const handleTouchEnd = (e: TouchEvent) => {
+            // 操作ボタン上でのタッチは無視する
+            if (e.target instanceof Element && e.target.closest('.pointer-events-auto') && !e.target.closest('.cursor-crosshair')) {
+                return;
+            }
+
             if (touchState.current.isPinching) {
                 touchState.current.isPinching = false;
                 setIsPinching(false);
@@ -496,7 +506,11 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                 <div className="fixed top-24 right-4 z-[1000] flex flex-col gap-3 items-end pointer-events-none sm:top-28">
                     {/* Page Navigation */}
                     {totalPages > 1 && (
-                        <div className="flex bg-white/90 backdrop-blur shadow-2xl rounded-2xl border border-stone-200 overflow-hidden pointer-events-auto">
+                        <div 
+                            className="flex bg-white/90 backdrop-blur shadow-2xl rounded-2xl border border-stone-200 overflow-hidden pointer-events-auto"
+                            onTouchStart={(e) => e.stopPropagation()}
+                            onTouchEnd={(e) => e.stopPropagation()}
+                        >
                             <button 
                                 onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
                                 disabled={currentPage === 1}
@@ -519,7 +533,11 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                         </div>
                     )}
 
-                    <div className="flex bg-white/90 backdrop-blur shadow-2xl rounded-2xl border border-stone-200 overflow-hidden pointer-events-auto">
+                    <div 
+                        className="flex bg-white/90 backdrop-blur shadow-2xl rounded-2xl border border-stone-200 overflow-hidden pointer-events-auto"
+                        onTouchStart={(e) => e.stopPropagation()}
+                        onTouchEnd={(e) => e.stopPropagation()}
+                    >
                         <button 
                             onClick={() => handleContainerZoomChange(Math.max(displayZoom - 0.2, 0.2))}
                             className="p-3 hover:bg-stone-100 text-stone-600"
