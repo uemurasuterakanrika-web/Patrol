@@ -69,6 +69,24 @@ export default function App() {
   const [inspectionCompleted, setInspectionCompleted] = useState(false);
   const [isPrinting, setIsPrinting] = useState(false);
   const [drawingPages, setDrawingPages] = useState<Record<number, string>>({});
+  const [siteDrawingUrl, setSiteDrawingUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fetchDrawing = async () => {
+      if (currentSite?.drawingPdfId) {
+        try {
+          const url = await api.getFileUrl(currentSite.drawingPdfId);
+          setSiteDrawingUrl(url);
+        } catch (e) {
+          console.error("Failed to fetch drawing:", e);
+          setSiteDrawingUrl(null);
+        }
+      } else {
+        setSiteDrawingUrl(null);
+      }
+    };
+    fetchDrawing();
+  }, [currentSite?.drawingPdfId]);
 
   const handleUpdateMarker = (markerId: string, updates: Partial<DrawingMarker>) => {
     if (!currentInspection) return;
@@ -150,7 +168,7 @@ export default function App() {
 
     if (markerPages.size > 0) {
       // PDFから各ページを画像として抽出
-      const pdfUrl = api.getFileUrl(currentSite.drawingPdfId);
+      const pdfUrl = await api.getFileUrl(currentSite.drawingPdfId);
       const pages: Record<number, string> = {};
       
       try {
@@ -327,6 +345,10 @@ export default function App() {
       setIsUploading(true);
       let drawingPdfId = undefined;
       if (newSiteDrawing) {
+        if (newSiteDrawing.length > 1048576) {
+          alert("図面のデータサイズが大きすぎます。解像度を下げるか、ページ数を減らしてください。");
+          return;
+        }
         console.log("Uploading PDF drawing...");
         const uploadRes = await api.uploadFile(newSiteDrawing);
         drawingPdfId = uploadRes.id;
@@ -355,6 +377,10 @@ export default function App() {
       let drawingPdfId = undefined;
       // If a new drawing was selected during edit, upload it
       if (newSiteDrawing) {
+        if (newSiteDrawing.length > 1048576) {
+          alert("図面のデータサイズが大きすぎます。解像度を下げるか、ページ数を減らしてください。");
+          return;
+        }
         console.log("Updating PDF drawing...");
         const uploadRes = await api.uploadFile(newSiteDrawing);
         drawingPdfId = uploadRes.id;
@@ -420,7 +446,8 @@ export default function App() {
     }
   };
 
-  const siteDrawingUrl = currentSite?.drawingPdfId ? api.getFileUrl(currentSite.drawingPdfId) : null;
+  // siteDrawingUrl is managed by state and useEffect above
+
 
   return (
     <div className="flex h-screen bg-stone-50 text-stone-900 font-sans overflow-hidden print:block print:h-auto print:overflow-visible print:bg-white">

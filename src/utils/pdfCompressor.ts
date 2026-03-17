@@ -8,11 +8,11 @@ pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.vers
  * PDFファイルを画像（JPEG）に変換してから再構築することで、
  * データサイズを圧縮（最適化）するユーティリティ関数。
  * @param file ユーザーが選択したPDFファイル
- * @param quality 画像の品質（0〜1, デフォルト0.6）
- * @param scale 解像度のスケール（デフォルト1.5 = 文字が読める程度の画質）
+ * @param quality 画像の品質（0〜1, デフォルト0.5）
+ * @param scale 解像度のスケール（デフォルト1.2 = 文字が読める程度の画質）
  * @returns 圧縮されたPDFのDataURL文字列
  */
-export const compressPdf = async (file: File, quality = 0.6, scale = 1.5): Promise<string> => {
+export const compressPdf = async (file: File, quality = 0.5, scale = 1.2): Promise<string> => {
   return new Promise(async (resolve) => {
     try {
       const arrayBuffer = await file.arrayBuffer();

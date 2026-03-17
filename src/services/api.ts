@@ -12,8 +12,7 @@ import {
   orderBy,
   runTransaction
 } from "firebase/firestore";
-import { ref, uploadString, getDownloadURL } from "firebase/storage";
-import { db, storage } from "../firebase";
+import { db } from "../firebase";
 
 export const api = {
   async getSites(): Promise<Site[]> {
@@ -109,19 +108,26 @@ export const api = {
   },
 
   async uploadFile(content: string, mimeType: string = 'application/pdf'): Promise<{ id: string }> {
-    // Generate a unique path
-    const fileId = `${Date.now()}_${Math.random().toString(36).substring(7)}`;
-    const storageRef = ref(storage, `files/${fileId}`);
+    // Save to Firestore 'files' collection instead of Storage to stay on free tier
+    const docRef = await addDoc(collection(db, "files"), {
+      content,
+      mimeType,
+      createdAt: new Date()
+    });
     
-    // Check if it's a data URL or raw string
-    const uploadTask = await uploadString(storageRef, content, 'data_url');
-    const url = await getDownloadURL(uploadTask.ref);
-    
-    return { id: url }; // Return the URL as the ID for easy display
+    return { id: docRef.id };
   },
 
-  getFileUrl(id: string): string {
-    // Since we return the URL in uploadFile, id IS the url
-    return id;
+  async getFileUrl(id: string): Promise<string> {
+    if (!id || id.startsWith('data:')) return id; // Already a data URL
+    try {
+      const docSnap = await getDoc(doc(db, "files", id));
+      if (docSnap.exists()) {
+        return docSnap.data().content;
+      }
+    } catch (e) {
+      console.error("Failed to fetch file from Firestore:", e);
+    }
+    return "";
   }
 };
