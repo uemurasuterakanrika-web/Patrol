@@ -10,62 +10,57 @@ function cn(...inputs: ClassValue[]) {
 export function VoiceInput({ value, onChange, className, ...props }: React.InputHTMLAttributes<HTMLInputElement> & { value: string; onChange: (e: any) => void }) {
     const [isListening, setIsListening] = useState(false);
     const recognitionRef = useRef<any>(null);
-    const [localValue, setLocalValue] = useState(value);
+    const valueRef = useRef(value);
 
+    // 最新の値をrefに同期
     useEffect(() => {
-        setLocalValue(value);
+        valueRef.current = value;
     }, [value]);
 
     useEffect(() => {
-        if (typeof window !== 'undefined') {
-            const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-            if (SpeechRecognition) {
-                const recognition = new SpeechRecognition();
-                recognition.continuous = true;
-                recognition.interimResults = true;
-                recognition.lang = 'ja-JP';
+        const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+        if (!SpeechRecognition) return;
 
-                recognition.onresult = (event: any) => {
-                    let interimTranscript = '';
-                    let finalTranscript = '';
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'ja-JP';
 
-                    for (let i = event.resultIndex; i < event.results.length; ++i) {
-                        const transcript = event.results[i][0].transcript;
-                        if (event.results[i].isFinal) {
-                            finalTranscript += transcript;
-                        } else {
-                            interimTranscript += transcript;
-                        }
-                    }
-
-                    if (finalTranscript) {
-                        const newValue = localValue + (localValue ? ' ' : '') + finalTranscript;
-                        setLocalValue(newValue);
-                        onChange({ target: { value: newValue } });
-                    }
-                };
-
-                recognition.onerror = (event: any) => {
-                    console.error("Speech recognition error", event.error);
-                    setIsListening(false);
-                };
-
-                recognition.onend = () => {
-                    setIsListening(false);
-                };
-
-                recognitionRef.current = recognition;
+        recognition.onresult = (event: any) => {
+            let finalTranscript = '';
+            for (let i = event.resultIndex; i < event.results.length; ++i) {
+                if (event.results[i].isFinal) {
+                    finalTranscript += event.results[i][0].transcript;
+                }
             }
-        }
+
+            if (finalTranscript) {
+                const newValue = valueRef.current + (valueRef.current ? ' ' : '') + finalTranscript;
+                onChange({ target: { value: newValue } });
+            }
+        };
+
+        recognition.onerror = (event: any) => {
+            console.error("Speech recognition error", event.error);
+            setIsListening(false);
+        };
+
+        recognition.onend = () => {
+            setIsListening(false);
+        };
+
+        recognitionRef.current = recognition;
 
         return () => {
             if (recognitionRef.current) {
                 recognitionRef.current.stop();
             }
         };
-    }, [onChange]); // Only recreation recognition if onChange changes
+    }, []); // マウント時に一度だけ初期化
 
-    const toggleListen = () => {
+    const toggleListen = (e: React.MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
         if (isListening) {
             recognitionRef.current?.stop();
         } else {
@@ -78,32 +73,31 @@ export function VoiceInput({ value, onChange, className, ...props }: React.Input
         }
     };
 
+    const hasSpeech = typeof window !== 'undefined' && ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
+
     return (
         <div className="relative flex items-center w-full">
             <input
-                value={localValue}
-                onChange={(e) => {
-                    setLocalValue(e.target.value);
-                    onChange(e);
-                }}
+                value={value}
+                onChange={onChange}
                 className={className}
                 {...props}
             />
-            {(window as any).SpeechRecognition || (window as any).webkitSpeechRecognition ? (
+            {hasSpeech && (
                 <button
                     type="button"
                     onClick={toggleListen}
                     className={cn(
-                        "absolute right-2 p-1.5 rounded-full z-10",
+                        "absolute right-2 p-1.5 rounded-full z-10 transition-colors",
                         isListening
                             ? "bg-rose-500 text-white"
                             : "text-stone-400 hover:text-emerald-500 hover:bg-stone-100"
                     )}
                     title="音声入力"
                 >
-                    {isListening ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
+                    {isListening ? <Mic className="w-4 h-4 animate-pulse" /> : <MicOff className="w-4 h-4" />}
                 </button>
-            ) : null}
+            )}
         </div>
     );
 }
@@ -111,59 +105,57 @@ export function VoiceInput({ value, onChange, className, ...props }: React.Input
 export function VoiceTextarea({ value, onChange, className, ...props }: React.TextareaHTMLAttributes<HTMLTextAreaElement> & { value: string; onChange: (e: any) => void }) {
     const [isListening, setIsListening] = useState(false);
     const recognitionRef = useRef<any>(null);
-    const [localValue, setLocalValue] = useState(value);
+    const valueRef = useRef(value);
 
+    // 最新の値をrefに同期
     useEffect(() => {
-        setLocalValue(value);
+        valueRef.current = value;
     }, [value]);
 
     useEffect(() => {
-        if (typeof window !== 'undefined') {
-            const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-            if (SpeechRecognition) {
-                const recognition = new SpeechRecognition();
-                recognition.continuous = true;
-                recognition.interimResults = true;
-                recognition.lang = 'ja-JP';
+        const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+        if (!SpeechRecognition) return;
 
-                recognition.onresult = (event: any) => {
-                    let finalTranscript = '';
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'ja-JP';
 
-                    for (let i = event.resultIndex; i < event.results.length; ++i) {
-                        const transcript = event.results[i][0].transcript;
-                        if (event.results[i].isFinal) {
-                            finalTranscript += transcript;
-                        }
-                    }
-
-                    if (finalTranscript) {
-                        const newValue = localValue + (localValue ? '\n' : '') + finalTranscript;
-                        setLocalValue(newValue);
-                        onChange({ target: { value: newValue } });
-                    }
-                };
-
-                recognition.onerror = (event: any) => {
-                    console.error("Speech recognition error", event.error);
-                    setIsListening(false);
-                };
-
-                recognition.onend = () => {
-                    setIsListening(false);
-                };
-
-                recognitionRef.current = recognition;
+        recognition.onresult = (event: any) => {
+            let finalTranscript = '';
+            for (let i = event.resultIndex; i < event.results.length; ++i) {
+                if (event.results[i].isFinal) {
+                    finalTranscript += event.results[i][0].transcript;
+                }
             }
-        }
+
+            if (finalTranscript) {
+                const newValue = valueRef.current + (valueRef.current ? '\n' : '') + finalTranscript;
+                onChange({ target: { value: newValue } });
+            }
+        };
+
+        recognition.onerror = (event: any) => {
+            console.error("Speech recognition error", event.error);
+            setIsListening(false);
+        };
+
+        recognition.onend = () => {
+            setIsListening(false);
+        };
+
+        recognitionRef.current = recognition;
 
         return () => {
             if (recognitionRef.current) {
                 recognitionRef.current.stop();
             }
         };
-    }, [onChange]); // Only recreation recognition if onChange changes
+    }, []); // マウント時に一度だけ初期化
 
-    const toggleListen = () => {
+    const toggleListen = (e: React.MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
         if (isListening) {
             recognitionRef.current?.stop();
         } else {
@@ -176,32 +168,31 @@ export function VoiceTextarea({ value, onChange, className, ...props }: React.Te
         }
     };
 
+    const hasSpeech = typeof window !== 'undefined' && ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
+
     return (
         <div className="relative flex w-full">
             <textarea
-                value={localValue}
-                onChange={(e) => {
-                    setLocalValue(e.target.value);
-                    onChange(e);
-                }}
+                value={value}
+                onChange={onChange}
                 className={className}
                 {...props}
             />
-            {(window as any).SpeechRecognition || (window as any).webkitSpeechRecognition ? (
+            {hasSpeech && (
                 <button
                     type="button"
                     onClick={toggleListen}
                     className={cn(
-                        "absolute bottom-2 right-2 p-1.5 rounded-full shadow-sm z-10",
+                        "absolute bottom-2 right-2 p-1.5 rounded-full shadow-sm z-10 transition-colors",
                         isListening
                             ? "bg-rose-500 text-white"
                             : "bg-white border border-stone-200 text-stone-400 hover:text-emerald-500 hover:bg-stone-50"
                     )}
                     title="音声入力"
                 >
-                    {isListening ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
+                    {isListening ? <Mic className="w-4 h-4 animate-pulse" /> : <MicOff className="w-4 h-4" />}
                 </button>
-            ) : null}
+            )}
         </div>
     );
 }

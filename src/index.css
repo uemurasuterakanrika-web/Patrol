@@ -206,10 +206,23 @@
   }
 
   /* Drawing Print Styles */
+  .report-drawings-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 15mm;
+    margin-top: 5mm;
+  }
+
+  .report-drawing-item {
+    page-break-inside: avoid;
+    display: flex;
+    flex-direction: column;
+  }
+
   .report-drawing-container {
     position: relative;
     width: 100%;
-    margin-top: 5mm;
+    margin-top: 2mm;
     border: 0.5pt solid #ccc;
     background: #f9f9f9;
   }

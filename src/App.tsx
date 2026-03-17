@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Plus,
   ClipboardCheck,
@@ -63,6 +63,40 @@ export default function App() {
   const [markerDescription, setMarkerDescription] = useState("");
   const [markerPhoto, setMarkerPhoto] = useState<string | null>(null);
   const [selectedMarkerDetail, setSelectedMarkerDetail] = useState<DrawingMarker | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const onFileSelectedRef = useRef<((file: File) => void) | null>(null);
+
+  const processImage = (file: File, callback: (dataUrl: string) => void) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const MAX = 1024;
+      let w = img.width, h = img.height;
+      if (w > h) { if (w > MAX) { h *= MAX / w; w = MAX; } } else { if (h > MAX) { w *= MAX / h; h = MAX; } }
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, w, h);
+        callback(canvas.toDataURL('image/jpeg', 0.6));
+      }
+      URL.revokeObjectURL(img.src);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(img.src);
+      alert("画像の読み込みに失敗しました。");
+    };
+    img.src = URL.createObjectURL(file);
+  };
+
+  const triggerUpload = (handler: (file: File) => void) => {
+    onFileSelectedRef.current = handler;
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
+  };
   const [isPreviewingPhoto, setIsPreviewingPhoto] = useState<string | null>(null);
   const [isActiveCorrecting, setIsActiveCorrecting] = useState(false);
   const [correctiveText, setCorrectiveText] = useState("");
@@ -108,6 +142,9 @@ export default function App() {
     });
     if (found) {
       setCurrentInspection({ ...currentInspection, items: updatedItems });
+      if (selectedMarkerDetail && selectedMarkerDetail.id === markerId) {
+        setSelectedMarkerDetail({ ...selectedMarkerDetail, ...updates });
+      }
       const changedItem = updatedItems.find(i => {
         const old = items.find(oi => oi.itemId === i.itemId);
         return old?.markers !== i.markers;
@@ -279,6 +316,18 @@ export default function App() {
 
   const handleManualItemUpdate = async (itemId: string, updates: Partial<InspectionItem>) => {
     if (!currentInspection) return;
+    
+    // 楽観的更新
+    const items = [...(currentInspection.items || [])];
+    const index = items.findIndex(i => i.itemId === itemId);
+    const updatedItems = [...items];
+    if (index >= 0) {
+      updatedItems[index] = { ...items[index], ...updates };
+    } else {
+      updatedItems.push({ itemId, ...updates } as InspectionItem);
+    }
+    setCurrentInspection({ ...currentInspection, items: updatedItems });
+
     try {
       await api.registerItemResult(currentInspection.id, {
         itemId,
@@ -290,55 +339,23 @@ export default function App() {
   };
 
   const handlePhotoUpload = (itemId: string, existingData: Partial<InspectionItem>, isCorrectivePhoto: boolean = false) => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'image/*';
-    input.onchange = async (e: any) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
+    triggerUpload((file) => {
+      processImage(file, (dataUrl) => {
+        const updates = { ...existingData };
+        if (isCorrectivePhoto) {
+          updates.correctivePhotoId = dataUrl;
+        } else {
+          updates.photoId = dataUrl;
+        }
+        handleManualItemUpdate(itemId, updates);
+      });
+    });
+  };
 
-      const reader = new FileReader();
-      reader.onload = async (event) => {
-        const originalBase64 = event.target?.result as string;
-        const img = new Image();
-        img.onload = () => {
-          const canvas = document.createElement('canvas');
-          const MAX_WIDTH = 1024;
-          const MAX_HEIGHT = 1024;
-          let width = img.width;
-          let height = img.height;
-
-          if (width > height) {
-            if (width > MAX_WIDTH) {
-              height *= MAX_WIDTH / width;
-              width = MAX_WIDTH;
-            }
-          } else {
-            if (height > MAX_HEIGHT) {
-              width *= MAX_HEIGHT / height;
-              height = MAX_HEIGHT;
-            }
-          }
-
-          canvas.width = width;
-          canvas.height = height;
-          const ctx = canvas.getContext('2d');
-          ctx?.drawImage(img, 0, 0, width, height);
-
-          const resizedBase64 = canvas.toDataURL('image/jpeg', 0.7);
-          const updates = { ...existingData };
-          if (isCorrectivePhoto) {
-            updates.correctivePhotoId = resizedBase64;
-          } else {
-            updates.photoId = resizedBase64;
-          }
-          handleManualItemUpdate(itemId, updates);
-        };
-        img.src = originalBase64;
-      };
-      reader.readAsDataURL(file);
-    };
-    input.click();
+  const handleMarkerPhotoUpload = (callback: (dataUrl: string) => void) => {
+    triggerUpload((file) => {
+      processImage(file, callback);
+    });
   };
 
   const handleManualHeaderUpdate = async (data: Partial<Inspection>) => {
@@ -466,12 +483,50 @@ export default function App() {
   };
 
   // siteDrawingUrl is managed by state and useEffect above
+  const unresolvedIssues = currentInspection ? (() => {
+    const issues: string[] = [];
+    
+    // 1. PDF Markers check
+    const allMarkers: DrawingMarker[] = (currentInspection.items || []).flatMap(item => {
+      try { return item.markers ? JSON.parse(item.markers) : []; } catch (e) { return []; }
+    });
+    const hasUnresolvedMarker = allMarkers.some(m => {
+      // 処置内容テキストは常に必須
+      if (!m.correctiveAction) return true;
+      // 指摘写真がある場合は処置写真も必須、なければ任意
+      if (m.issuePhotoId && !m.correctivePhotoId) return true;
+      return false;
+    });
+    if (hasUnresolvedMarker) issues.push("図面指摘の処置入力");
 
+    // 2. Inspection list items check
+    const hasUnresolvedItem = (currentInspection.items || []).some(item => {
+      const isIssue = item.rating === '✕' || item.rating === '×';
+      return isIssue && !item.correctiveAction;
+    });
+    if (hasUnresolvedItem) issues.push("点検項目の是正処置内容");
+
+    return issues;
+  })() : [];
+
+  const isReadyToReport = unresolvedIssues.length === 0;
 
   return (
     <div className="flex h-screen bg-stone-50 text-stone-900 font-sans overflow-hidden print:block print:h-auto print:overflow-visible print:bg-white">
       {/* アプリUI全般 (印刷時は非表示) */}
       <div className="flex-1 flex overflow-hidden no-print">
+        {/* Hidden Global Input */}
+        <input 
+          type="file" 
+          ref={fileInputRef} 
+          className="hidden" 
+          accept="image/*" 
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file && onFileSelectedRef.current) onFileSelectedRef.current(file);
+            e.target.value = '';
+          }}
+        />
         {isSidebarOpen && (
           <>
             <div
@@ -536,7 +591,7 @@ export default function App() {
       <main className="flex-1 flex flex-col relative h-full">
         <header className="h-16 bg-white border-b border-stone-200 flex items-center justify-between px-4 sticky top-0 z-30">
           <div className="flex items-center gap-3">
-            {currentInspection ? (
+            {currentInspection && (
               <button
                 onClick={() => {
                   setCurrentInspection(null);
@@ -549,15 +604,8 @@ export default function App() {
               >
                 <ArrowLeft className="w-6 h-6" />
               </button>
-            ) : (
-              <button
-                onClick={() => setIsSidebarOpen(true)}
-                className="p-2 hover:bg-stone-100 rounded-lg lg:hidden"
-                title="メニューを開く"
-              >
-                <Menu className="w-6 h-6" />
-              </button>
             )}
+
             <div>
               <h1 className="font-bold text-stone-900 leading-tight">現場パトロール点検表</h1>
               <p className="text-[10px] text-stone-500 uppercase tracking-wider font-semibold">
@@ -565,7 +613,7 @@ export default function App() {
               </p>
             </div>
           </div>
-          <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-700 font-bold text-xs">Y</div>
+
         </header>
 
         <div className="flex-1 overflow-hidden flex flex-col">
@@ -935,6 +983,18 @@ export default function App() {
                                     } catch (e) { }
                                   }
                                 });
+                                
+                                // 入力中のピンを即座に表示
+                                if (activeMarkerInput) {
+                                  const master = INSPECTION_ITEMS.find(m => m.id === activeMarkerInput.targetItemId);
+                                  allMarkers.push({
+                                    ...activeMarkerInput.markerData,
+                                    id: 'temp-pin',
+                                    label: '?',
+                                    description: markerDescription || '詳細を入力中...'
+                                  } as DrawingMarker);
+                                }
+                                
                                 return allMarkers;
                               })()}
                               onSelectMarker={(marker) => {
@@ -990,36 +1050,7 @@ export default function App() {
                                     <div className="space-y-1.5">
                                       <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider">現場写真</label>
                                       <div 
-                                        onClick={() => {
-                                          const input = document.createElement('input');
-                                          input.type = 'file';
-                                          input.accept = 'image/*';
-                                          input.onchange = (e: any) => {
-                                            const file = e.target.files?.[0];
-                                            if (!file) return;
-                                            const reader = new FileReader();
-                                            reader.onload = (event) => {
-                                              const img = new Image();
-                                              img.onload = () => {
-                                                const canvas = document.createElement('canvas');
-                                                const MAX = 1000;
-                                                let w = img.width, h = img.height;
-                                                if (w > h) { if (w > MAX) { h *= MAX / w; w = MAX; } } else { if (h > MAX) { w *= MAX / h; h = MAX; } }
-                                                canvas.width = w; canvas.height = h;
-                                                const ctx = canvas.getContext('2d');
-                                                if (ctx) {
-                                                  ctx.imageSmoothingEnabled = true;
-                                                  ctx.imageSmoothingQuality = 'high';
-                                                  ctx.drawImage(img, 0, 0, w, h);
-                                                  setMarkerPhoto(canvas.toDataURL('image/jpeg', 0.6));
-                                                }
-                                              };
-                                              img.src = event.target?.result as string;
-                                            };
-                                            reader.readAsDataURL(file);
-                                          };
-                                          input.click();
-                                        }}
+                                        onClick={() => handleMarkerPhotoUpload(setMarkerPhoto)}
                                         className={cn(
                                           "w-full aspect-video rounded-2xl border-2 border-dashed flex flex-col items-center justify-center cursor-pointer overflow-hidden",
                                           markerPhoto ? "border-emerald-300 bg-emerald-50" : "border-stone-200 bg-stone-50 hover:border-emerald-200"
@@ -1038,7 +1069,7 @@ export default function App() {
 
                                     <button
                                       onClick={() => {
-                                        if (!activeMarkerInput || !markerDescription.trim() || !markerPhoto || !currentInspection) return;
+                                        if (!activeMarkerInput || !markerDescription.trim() || !currentInspection) return;
                                         const allMarkers: DrawingMarker[] = (currentInspection.items || []).flatMap(item => {
                                           try { return item.markers ? JSON.parse(item.markers) : []; } catch (e) { return []; }
                                         });
@@ -1054,13 +1085,22 @@ export default function App() {
                                           issuePhotoId: markerPhoto || undefined,
                                           description: markerDescription
                                         };
+                                        
+                                        // 楽観的更新
+                                        const updatedItems = currentInspection.items?.map(i => 
+                                          i.itemId === activeMarkerInput.targetItemId 
+                                            ? { ...i, markers: JSON.stringify([...existingMarkers, newMarker]) }
+                                            : i
+                                        ) || [];
+                                        setCurrentInspection({ ...currentInspection, items: updatedItems });
+
                                         handleManualItemUpdate(activeMarkerInput.targetItemId, { markers: JSON.stringify([...existingMarkers, newMarker]) });
                                         setActiveMarkerInput(null);
                                         setMarkerDescription("");
                                         setMarkerPhoto(null);
                                         setPinningForItem(null);
                                       }}
-                                      disabled={!markerDescription.trim() || !markerPhoto}
+                                      disabled={!markerDescription.trim()}
                                       className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
                                     >
                                       完了
@@ -1091,10 +1131,25 @@ export default function App() {
                                           onClick={() => setIsPreviewingPhoto(selectedMarkerDetail.issuePhotoId!)}
                                         />
                                       ) : (
-                                        <div className="w-full h-full flex flex-col items-center justify-center text-stone-300">
+                                        <div 
+                                          className="w-full h-full flex flex-col items-center justify-center text-stone-300 hover:bg-stone-200 cursor-pointer"
+                                          onClick={() => handleMarkerPhotoUpload((dataUrl) => handleUpdateMarker(selectedMarkerDetail.id, { issuePhotoId: dataUrl }))}
+                                        >
                                           <Camera className="w-12 h-12 mb-2" />
-                                          <span className="text-xs">写真なし</span>
+                                          <span className="text-xs">タップで写真を追加</span>
                                         </div>
+                                      )}
+                                      {selectedMarkerDetail.issuePhotoId && (
+                                        <button 
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleMarkerPhotoUpload((dataUrl) => handleUpdateMarker(selectedMarkerDetail.id, { issuePhotoId: dataUrl }));
+                                          }}
+                                          className="absolute top-3 left-3 p-2 bg-black/40 hover:bg-black/60 text-white rounded-full backdrop-blur-md opacity-0 group-hover:opacity-100 transition-opacity"
+                                          title="写真を変更"
+                                        >
+                                          <Camera className="w-3.5 h-3.5" />
+                                        </button>
                                       )}
                                       {selectedMarkerDetail.issuePhotoId && (
                                         <div className="absolute bottom-3 left-3 bg-black/50 text-white text-[10px] font-bold px-2 py-1 rounded backdrop-blur-sm pointer-events-none opacity-0 group-hover:opacity-100 flex items-center gap-1">
@@ -1172,7 +1227,7 @@ export default function App() {
                                               setIsActiveCorrecting(false);
                                               setSelectedMarkerDetail(null);
                                             }}
-                                            disabled={!correctiveText || !correctivePhoto}
+                                            disabled={!correctiveText || (selectedMarkerDetail.issuePhotoId && !correctivePhoto)}
                                             className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
                                           >
                                             処置を完了する
@@ -1193,12 +1248,32 @@ export default function App() {
                                                 <CheckCircle2 className="w-3 h-3" /> 実施済み処置
                                               </div>
                                               <p className="text-sm text-stone-700 font-medium">{selectedMarkerDetail.correctiveAction}</p>
-                                              {selectedMarkerDetail.correctivePhotoId && (
+                                              {selectedMarkerDetail.correctivePhotoId ? (
+                                                <div className="relative group/corrective mt-2">
+                                                  <button 
+                                                    onClick={() => setIsPreviewingPhoto(selectedMarkerDetail.correctivePhotoId!)}
+                                                    className="w-full aspect-video rounded-xl overflow-hidden border border-emerald-200"
+                                                  >
+                                                    <img src={selectedMarkerDetail.correctivePhotoId} className="w-full h-full object-cover" alt="処置写真" />
+                                                  </button>
+                                                  <button 
+                                                    onClick={(e) => {
+                                                      e.stopPropagation();
+                                                      handleMarkerPhotoUpload((dataUrl) => handleUpdateMarker(selectedMarkerDetail.id, { correctivePhotoId: dataUrl }));
+                                                    }}
+                                                    className="absolute top-2 right-2 p-2 bg-black/40 hover:bg-black/60 text-white rounded-full backdrop-blur-md opacity-0 group-hover/corrective:opacity-100 transition-opacity"
+                                                    title="処置写真を変更"
+                                                  >
+                                                    <Camera className="w-3.5 h-3.5" />
+                                                  </button>
+                                                </div>
+                                              ) : (
                                                 <button 
-                                                  onClick={() => setIsPreviewingPhoto(selectedMarkerDetail.correctivePhotoId!)}
-                                                  className="mt-2 w-full aspect-video rounded-xl overflow-hidden border border-emerald-200"
+                                                  onClick={() => handleMarkerPhotoUpload((dataUrl) => handleUpdateMarker(selectedMarkerDetail.id, { correctivePhotoId: dataUrl }))}
+                                                  className="mt-2 w-full py-3 bg-white border border-dashed border-emerald-200 rounded-xl text-emerald-600 text-[10px] font-bold flex items-center justify-center gap-2 hover:bg-emerald-50 transition-colors"
                                                 >
-                                                  <img src={selectedMarkerDetail.correctivePhotoId} className="w-full h-full object-cover" alt="処置写真" />
+                                                  <Camera className="w-3.5 h-3.5" />
+                                                  処置写真を追加
                                                 </button>
                                               )}
                                             </div>
@@ -1275,7 +1350,13 @@ export default function App() {
                     <button
                       onClick={async () => {
                         const newStatus = currentInspection.status === 'completed' ? 'draft' : 'completed';
-                        if (newStatus === 'completed' && !confirm("点検を「完了報告」としてマークしますか？履歴で処置完了として表示されます。")) return;
+                        if (newStatus === 'completed') {
+                          if (!isReadyToReport) {
+                            alert("全ての指摘事項に処置を入力してください。\n\n【未完了項目】\n・" + unresolvedIssues.join("\n・"));
+                            return;
+                          }
+                          if (!confirm("点検を「完了報告」としてマークしますか？履歴で処置完了として表示されます。")) return;
+                        }
                         try {
                           await api.updateInspection(currentInspection.id, { status: newStatus });
                           setCurrentInspection({ ...currentInspection, status: newStatus });
@@ -1287,7 +1368,9 @@ export default function App() {
                         "flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-bold border transition-all shadow-sm",
                         currentInspection.status === 'completed'
                           ? "bg-emerald-600 border-emerald-600 text-white hover:bg-emerald-700"
-                          : "bg-white border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+                          : isReadyToReport
+                            ? "bg-white border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+                            : "bg-stone-50 border-stone-200 text-stone-400 cursor-not-allowed"
                       )}
                     >
                       <CheckCircle2 className="w-4 h-4" />
@@ -1346,6 +1429,23 @@ export default function App() {
                                     className="flex-1 bg-white border border-rose-100 rounded-lg px-3 py-2 text-base min-h-[80px]" 
                                     rows={2}
                                   />
+                                  <button 
+                                    onClick={() => handlePhotoUpload(itemMaster.id, result || {}, false)}
+                                    className={cn(
+                                      "w-20 h-20 rounded-xl border-2 border-dashed flex flex-col items-center justify-center shrink-0 overflow-hidden",
+                                      result?.photoId ? "border-rose-300 bg-rose-50" : "border-stone-200 bg-white hover:border-rose-200 text-stone-300"
+                                    )}
+                                    title="指摘写真を撮影・選択"
+                                  >
+                                    {result?.photoId ? (
+                                      <img src={result.photoId} className="w-full h-full object-cover" alt="状況写真" />
+                                    ) : (
+                                      <>
+                                        <Camera className="w-6 h-6" />
+                                        <span className="text-[10px]">写真</span>
+                                      </>
+                                    )}
+                                  </button>
                                 </div>
                               </div>
                               <div className="space-y-1.5 bg-emerald-50 p-3 rounded-xl border border-emerald-100/50">
@@ -1358,6 +1458,23 @@ export default function App() {
                                     className="flex-1 bg-white border border-emerald-100 rounded-lg px-3 py-2 text-base min-h-[80px]" 
                                     rows={2}
                                   />
+                                  <button 
+                                    onClick={() => handlePhotoUpload(itemMaster.id, result || {}, true)}
+                                    className={cn(
+                                      "w-20 h-20 rounded-xl border-2 border-dashed flex flex-col items-center justify-center shrink-0 overflow-hidden",
+                                      result?.correctivePhotoId ? "border-emerald-300 bg-emerald-50" : "border-stone-200 bg-white hover:border-emerald-200 text-stone-300"
+                                    )}
+                                    title="是正写真を撮影・選択"
+                                  >
+                                    {result?.correctivePhotoId ? (
+                                      <img src={result.correctivePhotoId} className="w-full h-full object-cover" alt="是正写真" />
+                                    ) : (
+                                      <>
+                                        <Camera className="w-6 h-6" />
+                                        <span className="text-[10px]">写真</span>
+                                      </>
+                                    )}
+                                  </button>
                                 </div>
                               </div>
                             </div>
@@ -1407,60 +1524,80 @@ export default function App() {
             return acc;
           }, {} as Record<string, typeof INSPECTION_ITEMS>);
 
-          return Object.entries(sections).map(([sectionName, items]) => (
-            <div key={sectionName} className="report-group">
-              <div className="report-group-header">{sectionName}</div>
-              {items.map(itemMaster => {
-                const result = currentInspection?.items?.find(i => i.itemId === itemMaster.id);
-                return (
-                  <div key={itemMaster.id} className="report-item-box">
-                    <div className="report-item-title">{itemMaster.label}</div>
-                    <div className="report-item-row">
-                      <span className="report-item-label">指摘内容（状況）</span>
-                      <div className="report-item-value-line">{result?.comment}</div>
+          return Object.entries(sections).map(([sectionName, items]) => {
+            // 指摘内容がある項目のみを抽出
+            const filteredItems = items.filter(itemMaster => {
+              const result = currentInspection?.items?.find(i => i.itemId === itemMaster.id);
+              return result?.comment && result.comment.trim() !== "";
+            });
+
+            // 指摘がある項目が1つもないセクションは表示しない
+            if (filteredItems.length === 0) return null;
+
+            return (
+              <div key={sectionName} className="report-group">
+                <div className="report-group-header">{sectionName}</div>
+                {filteredItems.map(itemMaster => {
+                  const result = currentInspection?.items?.find(i => i.itemId === itemMaster.id);
+                  return (
+                    <div key={itemMaster.id} className="report-item-box">
+                      <div className="report-item-title">{itemMaster.label}</div>
+                      <div className="report-item-row">
+                        <span className="report-item-label">指摘内容（状況）</span>
+                        <div className="report-item-value-line">{result?.comment || ""}</div>
+                      </div>
+                      <div className="report-item-row">
+                        <span className="report-item-label">是正処置</span>
+                        <div className="report-item-value-line">{result?.correctiveAction || ""}</div>
+                      </div>
                     </div>
-                    <div className="report-item-row">
-                      <span className="report-item-label">是正処置</span>
-                      <div className="report-item-value-line">{result?.correctiveAction}</div>
+                  );
+                })}
+              </div>
+            );
+          });
+        })()}
+
+        {/* ピンがある図面を表示 */}
+        {Object.keys(drawingPages).length > 0 && (
+          <div className="page-break">
+            <div className="report-section-header">指摘箇所（図面）</div>
+            <div className="report-drawings-grid">
+              {Object.entries(drawingPages).map(([pageNum, dataUrl]) => {
+                const pageInt = parseInt(pageNum);
+                const pageMarkers = (currentInspection?.items || []).flatMap(item => {
+                  try {
+                    const markers: DrawingMarker[] = item.markers ? JSON.parse(item.markers) : [];
+                    return markers.filter(m => (m.page || 1) === pageInt);
+                  } catch (e) { return []; }
+                });
+
+                return (
+                  <div key={pageNum} className="report-drawing-item">
+                    <div className="report-photo-caption" style={{ textAlign: 'left', marginBottom: '1.5mm', fontSize: '9pt', fontWeight: 'bold' }}>
+                      {pageNum}ページ目
+                    </div>
+                    <div className="report-drawing-container">
+                      <img src={dataUrl} className="report-drawing-image" alt={`Drawing Page ${pageNum}`} />
+                      {pageMarkers.map(marker => {
+                        const isResolved = marker.correctiveAction && (!marker.issuePhotoId || marker.correctivePhotoId);
+                        return (
+                          <div 
+                            key={marker.id} 
+                            className={cn("report-drawing-pin", isResolved ? "resolved" : "issue")}
+                            style={{ left: `${marker.x}%`, top: `${marker.y}%` }}
+                          >
+                            {marker.label}
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 );
               })}
             </div>
-          ));
-        })()}
-
-        {/* ピンがある図面を表示 */}
-        {Object.entries(drawingPages).map(([pageNum, dataUrl]) => {
-          const pageInt = parseInt(pageNum);
-          const pageMarkers = (currentInspection?.items || []).flatMap(item => {
-            try {
-              const markers: DrawingMarker[] = item.markers ? JSON.parse(item.markers) : [];
-              return markers.filter(m => (m.page || 1) === pageInt);
-            } catch (e) { return []; }
-          });
-
-          return (
-            <div key={pageNum} className="page-break" style={{ marginBottom: '10mm' }}>
-              <div className="report-section-header">現場図面（指摘箇所：{pageNum}ページ目）</div>
-              <div className="report-drawing-container">
-                <img src={dataUrl} className="report-drawing-image" alt={`Drawing Page ${pageNum}`} />
-                {pageMarkers.map(marker => {
-                  const isResolved = marker.correctiveAction && marker.correctivePhotoId;
-                  return (
-                    <div 
-                      key={marker.id} 
-                      className={cn("report-drawing-pin", isResolved ? "resolved" : "issue")}
-                      style={{ left: `${marker.x}%`, top: `${marker.y}%` }}
-                    >
-                      {marker.label}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          );
-        })}
+          </div>
+        )}
 
         {/* 図面ピンの指摘記録を追加 */}
         {(() => {

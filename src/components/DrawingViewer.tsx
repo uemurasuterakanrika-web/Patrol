@@ -49,7 +49,10 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
         isPinching: false, 
         pinchOriginX: 0, 
         pinchOriginY: 0,
-        lastScaleFactor: 1.0 
+        lastScaleFactor: 1.0,
+        startX: 0,
+        startY: 0,
+        startTime: 0
     });
     const renderTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const lastZoomRef = useRef(displayZoom);
@@ -313,6 +316,11 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
         if (!container) return;
 
         const handleTouchStart = (e: TouchEvent) => {
+            if (e.touches.length === 1) {
+                touchState.current.startX = e.touches[0].clientX;
+                touchState.current.startY = e.touches[0].clientY;
+                touchState.current.startTime = Date.now();
+            }
             if (e.touches.length === 2) {
                 const dist = Math.hypot(
                     e.touches[0].pageX - e.touches[1].pageX,
@@ -334,6 +342,7 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                 }
 
                 touchState.current = {
+                    ...touchState.current,
                     distance: dist,
                     initialZoom: displayZoom,
                     isPinching: true,
@@ -373,7 +382,7 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
             }
         };
 
-        const handleTouchEnd = () => {
+        const handleTouchEnd = (e: TouchEvent) => {
             if (touchState.current.isPinching) {
                 touchState.current.isPinching = false;
                 setIsPinching(false);
@@ -402,6 +411,34 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                     if (viewerRef.current) {
                         viewerRef.current.style.transform = 'none';
                         viewerRef.current.style.willChange = 'auto';
+                    }
+                }
+            } else if (e.changedTouches.length === 1 && !readOnly) {
+                // シングルタップによるピン設置
+                const timeDiff = Date.now() - touchState.current.startTime;
+                const endX = e.changedTouches[0].clientX;
+                const endY = e.changedTouches[0].clientY;
+                const distFromStart = Math.hypot(
+                    endX - touchState.current.startX,
+                    endY - touchState.current.startY
+                );
+
+                // 300ms以内、かつ移動距離が小さい場合はタップとみなす
+                if (timeDiff < 300 && distFromStart < 15) {
+                    const rect = viewerRef.current?.getBoundingClientRect();
+                    if (rect) {
+                        const x = ((endX - rect.left) / rect.width) * 100;
+                        const y = ((endY - rect.top) / rect.height) * 100;
+                        
+                        // ReactのonClickと二重発火しないよう短いラグを空けて呼ぶか、preventDefaultを検討
+                        // ここでは直接呼び出し
+                        onAddMarker({
+                            x,
+                            y,
+                            label: ``,
+                            type: 'issue',
+                            page: currentPage
+                        });
                     }
                 }
             }
@@ -583,7 +620,7 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                             }}
                         >
                             {(() => {
-                                const isResolved = marker.correctiveAction && marker.correctivePhotoId;
+                                const isResolved = marker.correctiveAction && (!marker.issuePhotoId || marker.correctivePhotoId);
                                 return (
                                     <div className={`
                                         flex items-center justify-center w-8 h-8 rounded-full shadow-lg border-2 border-white
