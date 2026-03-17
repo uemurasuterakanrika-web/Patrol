@@ -233,7 +233,14 @@ export default function App() {
     // Inspections Listener
     const qInspections = query(collection(db, "inspections"), orderBy("date", "desc"));
     const unsubInspections = onSnapshot(qInspections, (snapshot) => {
-      const inspectionsData = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Inspection));
+      const inspectionsData = snapshot.docs.map(d => {
+        const data = d.data();
+        return { 
+          id: d.id, 
+          status: 'draft', 
+          ...data 
+        } as Inspection;
+      });
       setInspections(inspectionsData);
       
       // Update current inspection if it was updated
@@ -258,10 +265,14 @@ export default function App() {
   }, [currentSite?.id, currentInspection?.id]); // Only re-setup if active IDs change
 
   const loadInitialData = async () => {
-    const [sitesData, inspectionsData] = await Promise.all([
+    const [sitesData, rawInspections] = await Promise.all([
       api.getSites(),
       api.getInspections()
     ]);
+    const inspectionsData = rawInspections.map(insp => ({
+      status: 'draft',
+      ...insp
+    }));
     setSites(sitesData);
     setInspections(inspectionsData);
   };
@@ -442,7 +453,7 @@ export default function App() {
   const selectInspection = async (id: string) => {
     try {
       const insp = await api.getInspection(id);
-      setCurrentInspection(insp);
+      setCurrentInspection({ status: 'draft', ...insp });
       const site = sites.find(s => s.id === insp.siteId);
       if (site) setCurrentSite(site);
       setIsSidebarOpen(false);
@@ -760,48 +771,18 @@ export default function App() {
                                   </div>
                                   <div>
                                     <div className="font-bold text-stone-800">{insp.date}</div>
-                                    <div className="text-[10px] font-bold text-stone-500 uppercase tracking-wider flex items-center gap-1.5">
-                                      {(() => {
-                                        const items = insp.items || [];
-                                        
-                                        const allMarkers: DrawingMarker[] = [];
-                                        items.forEach(item => {
-                                          if (item.markers) {
-                                            try {
-                                              const markers: DrawingMarker[] = JSON.parse(item.markers);
-                                              allMarkers.push(...markers);
-                                            } catch (e) {}
-                                          }
-                                        });
-
-                                        const issueItems = items.filter(item => item.rating === '✕' || item.rating === '×');
-                                        
-                                        const issuesResolved = issueItems.every(item =>
-                                          item.correctiveAction && item.correctiveAction.trim() !== ""
-                                        );
-
-                                        const markersResolved = allMarkers.every(m =>
-                                          m.correctiveAction && m.correctiveAction.trim() !== "" && m.correctivePhotoId
-                                        );
-
-                                        const hasAnyIssue = issueItems.length > 0 || allMarkers.length > 0;
-
-                                        if (hasAnyIssue && (!issuesResolved || !markersResolved)) {
-                                          return (
-                                            <>
-                                              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-                                              処置完了待ち
-                                            </>
-                                          );
-                                        } else {
-                                          return (
-                                            <>
-                                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                                              処置完了
-                                            </>
-                                          );
-                                        }
-                                      })()}
+                                    <div className="flex items-center gap-1.5 text-[10px] font-bold">
+                                      {insp.status === 'completed' ? (
+                                        <>
+                                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                                          処置完了
+                                        </>
+                                      ) : (
+                                        <>
+                                          <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                                          処置完了報告待ち
+                                        </>
+                                      )}
                                     </div>
                                   </div>
                                 </div>
