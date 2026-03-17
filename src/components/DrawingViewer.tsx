@@ -150,7 +150,14 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                     pdjData = { data: bytes };
                 }
 
-                const loadingTask = pdfjs.getDocument(pdjData);
+                const CMAP_URL = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/cmaps/`;
+                const CMAP_PACKED = true;
+
+                const loadingTask = pdfjs.getDocument({
+                    ...pdjData,
+                    cMapUrl: CMAP_URL,
+                    cMapPacked: CMAP_PACKED
+                });
                 const pdf = await loadingTask.promise;
                 if (isMounted) {
                     setPdfDoc(pdf);

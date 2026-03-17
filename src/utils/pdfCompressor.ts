@@ -4,75 +4,89 @@ import { jsPDF } from 'jspdf';
 // Configure worker
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.js`;
 
+const CMAP_URL = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/cmaps/`;
+const CMAP_PACKED = true;
+
 /**
  * PDFファイルを画像（JPEG）に変換してから再構築することで、
  * データサイズを圧縮（最適化）するユーティリティ関数。
  * @param file ユーザーが選択したPDFファイル
- * @param quality 画像の品質（0〜1, デフォルト0.5）
- * @param scale 解像度のスケール（デフォルト1.2 = 文字が読める程度の画質）
+ * @param targetMaxSizeBytes 目標とする最大ファイルサイズ（デフォルト1MB）
  * @returns 圧縮されたPDFのDataURL文字列
  */
-export const compressPdf = async (file: File, quality = 0.5, scale = 1.2): Promise<string> => {
+export const compressPdf = async (file: File, targetMaxSizeBytes = 1000000): Promise<string> => {
+  // すでに十分小さい場合は、そのままDataURLにして返す（画質劣化を防ぐ）
+  if (file.size < targetMaxSizeBytes * 0.8) {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => resolve(e.target?.result as string);
+      reader.readAsDataURL(file);
+    });
+  }
+
   return new Promise(async (resolve) => {
     try {
       const arrayBuffer = await file.arrayBuffer();
-      // 元のPDFを読み込む
-      const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+      // 元のPDFを読み込む。cMap設定がないと日本語等の文字が消えることがある。
+      const pdf = await pdfjs.getDocument({ 
+        data: arrayBuffer,
+        cMapUrl: CMAP_URL,
+        cMapPacked: CMAP_PACKED
+      }).promise;
       
-      // 出力用の新しいPDFインスタンスを作成
-      const compressedPdf = new jsPDF({
-        unit: 'px',
-        compress: true // Zlib圧縮を有効化
-      });
-      
-      // jsPDF初期作成時の空ページ（1ページ目）を削除するために保持
-      let isFirstPageReplaced = false;
+      // 最初は高めの設定で試みる
+      let scale = 1.8;
+      let quality = 0.7;
+      let finalDataUrl = "";
 
-      for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        const viewport = page.getViewport({ scale });
-        
-        // Canvasを作成してPDFの1ページをレンダリングする
-        const canvas = document.createElement('canvas');
-        const context = canvas.getContext('2d');
-        if (!context) continue;
-        
-        canvas.width = viewport.width;
-        canvas.height = viewport.height;
-        
-        // 背景を白で塗りつぶし（透過防止）
-        context.fillStyle = 'white';
-        context.fillRect(0, 0, canvas.width, canvas.height);
+      // 1MB制限に収まるまで再試行（最大3回）
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const compressedPdf = new jsPDF({ unit: 'px', compress: true });
+        let isFirstPageReplaced = false;
 
-        await page.render({
-          canvasContext: context,
-          viewport: viewport
-        }).promise;
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const viewport = page.getViewport({ scale });
+          const canvas = document.createElement('canvas');
+          const context = canvas.getContext('2d');
+          if (!context) continue;
+          
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          context.fillStyle = 'white';
+          context.fillRect(0, 0, canvas.width, canvas.height);
+
+          await page.render({ canvasContext: context, viewport }).promise;
+          
+          const imgData = canvas.toDataURL('image/jpeg', quality);
+          const orientation = viewport.width > viewport.height ? 'landscape' : 'portrait';
+          
+          compressedPdf.addPage([viewport.width, viewport.height], orientation);
+          compressedPdf.addImage(imgData, 'JPEG', 0, 0, viewport.width, viewport.height);
+          
+          if (!isFirstPageReplaced) {
+            compressedPdf.deletePage(1);
+            isFirstPageReplaced = true;
+          }
+        }
         
-        // CanvasをJPEGに変換して圧縮
-        const imgData = canvas.toDataURL('image/jpeg', quality);
-        const orientation = viewport.width > viewport.height ? 'landscape' : 'portrait';
+        finalDataUrl = compressedPdf.output('datauristring');
         
-        // 新しいページを追加（サイズは元ページのviewportに合わせる）
-        compressedPdf.addPage([viewport.width, viewport.height], orientation);
-        
-        // 画像をページ全体に配置
-        compressedPdf.addImage(imgData, 'JPEG', 0, 0, viewport.width, viewport.height);
-        
-        // jsPDFが最初に作ってしまったデフォルトページを消す
-        if (!isFirstPageReplaced) {
-          compressedPdf.deletePage(1);
-          isFirstPageReplaced = true;
+        // 1MB制限チェック (DataURLは元のデータより約1.3倍大きくなるため厳しめにチェック)
+        if (finalDataUrl.length < targetMaxSizeBytes * 1.3) {
+          break;
+        } else {
+          // サイズオーバーなら品質と解像度を下げて再試行
+          scale -= 0.4;
+          quality -= 0.15;
+          console.log(`Retrying compression: attempt ${attempt + 1}, scale=${scale}, quality=${quality}`);
         }
       }
       
-      // 圧縮したPDFをDataURLとして出力
-      const finalDataUrl = compressedPdf.output('datauristring');
       resolve(finalDataUrl);
       
     } catch (e) {
-      console.error('PDFファイルの圧縮に失敗しました。元のファイルを使用します:', e);
-      // エラー時はフォールバックとして圧縮前のファイルをそのまま返す
+      console.error('PDFファイルの圧縮に失敗しました:', e);
       const reader = new FileReader();
       reader.onload = (ev) => resolve(ev.target?.result as string);
       reader.readAsDataURL(file);

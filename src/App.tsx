@@ -176,7 +176,14 @@ export default function App() {
           ? { data: new Uint8Array(atob(pdfUrl.split(',')[1]).split('').map(c => c.charCodeAt(0))) }
           : { url: pdfUrl };
         
-        const loadingTask = pdfjs.getDocument(pdfData);
+        const CMAP_URL = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/cmaps/`;
+        const CMAP_PACKED = true;
+
+        const loadingTask = pdfjs.getDocument({
+          ...pdfData,
+          cMapUrl: CMAP_URL,
+          cMapPacked: CMAP_PACKED
+        });
         const pdf = await loadingTask.promise;
         
         for (const pageNum of Array.from(markerPages)) {
