@@ -7,15 +7,19 @@ function cn(...inputs: ClassValue[]) {
     return twMerge(clsx(inputs));
 }
 
-export function VoiceInput({ value, onChange, className, ...props }: React.InputHTMLAttributes<HTMLInputElement> & { value: string; onChange: (e: any) => void }) {
+export function VoiceInput({ value: propsValue, onChange, className, ...props }: React.InputHTMLAttributes<HTMLInputElement> & { value: string; onChange: (e: any) => void }) {
     const [isListening, setIsListening] = useState(false);
+    const [localValue, setLocalValue] = useState(propsValue);
     const recognitionRef = useRef<any>(null);
-    const valueRef = useRef(value);
+    const timeoutRef = useRef<any>(null);
+    const isFocused = useRef(false);
 
-    // 最新の値をrefに同期
+    // 外部の変更を内部に反映（フォーカス中以外、または値が変わったとき）
     useEffect(() => {
-        valueRef.current = value;
-    }, [value]);
+        if (!isFocused.current && propsValue !== localValue) {
+            setLocalValue(propsValue);
+        }
+    }, [propsValue]);
 
     useEffect(() => {
         const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -35,7 +39,8 @@ export function VoiceInput({ value, onChange, className, ...props }: React.Input
             }
 
             if (finalTranscript) {
-                const newValue = valueRef.current + (valueRef.current ? ' ' : '') + finalTranscript;
+                const newValue = localValue + (localValue ? ' ' : '') + finalTranscript;
+                setLocalValue(newValue);
                 onChange({ target: { value: newValue } });
             }
         };
@@ -56,7 +61,17 @@ export function VoiceInput({ value, onChange, className, ...props }: React.Input
                 recognitionRef.current.stop();
             }
         };
-    }, []); // マウント時に一度だけ初期化
+    }, [localValue]); // localValueに依存させる
+
+    const handleTextChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const nextValue = e.target.value;
+        setLocalValue(nextValue);
+
+        if (timeoutRef.current) clearTimeout(timeoutRef.current);
+        timeoutRef.current = setTimeout(() => {
+            onChange(e);
+        }, 300); // 300ms デバウンス
+    };
 
     const toggleListen = (e: React.MouseEvent) => {
         e.preventDefault();
@@ -78,8 +93,14 @@ export function VoiceInput({ value, onChange, className, ...props }: React.Input
     return (
         <div className="relative flex items-center w-full">
             <input
-                value={value}
-                onChange={onChange}
+                value={localValue}
+                onChange={handleTextChange}
+                onFocus={() => { isFocused.current = true; }}
+                onBlur={(e) => { 
+                    isFocused.current = false;
+                    // 確実に同期させるためonBlur時にも呼び出し
+                    onChange(e);
+                }}
                 className={className}
                 {...props}
             />
@@ -102,15 +123,19 @@ export function VoiceInput({ value, onChange, className, ...props }: React.Input
     );
 }
 
-export function VoiceTextarea({ value, onChange, className, ...props }: React.TextareaHTMLAttributes<HTMLTextAreaElement> & { value: string; onChange: (e: any) => void }) {
+export function VoiceTextarea({ value: propsValue, onChange, className, ...props }: React.TextareaHTMLAttributes<HTMLTextAreaElement> & { value: string; onChange: (e: any) => void }) {
     const [isListening, setIsListening] = useState(false);
+    const [localValue, setLocalValue] = useState(propsValue);
     const recognitionRef = useRef<any>(null);
-    const valueRef = useRef(value);
+    const timeoutRef = useRef<any>(null);
+    const isFocused = useRef(false);
 
-    // 最新の値をrefに同期
+    // 外部の変更を内部に反映
     useEffect(() => {
-        valueRef.current = value;
-    }, [value]);
+        if (!isFocused.current && propsValue !== localValue) {
+            setLocalValue(propsValue);
+        }
+    }, [propsValue]);
 
     useEffect(() => {
         const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -130,7 +155,8 @@ export function VoiceTextarea({ value, onChange, className, ...props }: React.Te
             }
 
             if (finalTranscript) {
-                const newValue = valueRef.current + (valueRef.current ? '\n' : '') + finalTranscript;
+                const newValue = localValue + (localValue ? '\n' : '') + finalTranscript;
+                setLocalValue(newValue);
                 onChange({ target: { value: newValue } });
             }
         };
@@ -151,7 +177,17 @@ export function VoiceTextarea({ value, onChange, className, ...props }: React.Te
                 recognitionRef.current.stop();
             }
         };
-    }, []); // マウント時に一度だけ初期化
+    }, [localValue]);
+
+    const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+        const nextValue = e.target.value;
+        setLocalValue(nextValue);
+
+        if (timeoutRef.current) clearTimeout(timeoutRef.current);
+        timeoutRef.current = setTimeout(() => {
+            onChange(e);
+        }, 300);
+    };
 
     const toggleListen = (e: React.MouseEvent) => {
         e.preventDefault();
@@ -173,8 +209,13 @@ export function VoiceTextarea({ value, onChange, className, ...props }: React.Te
     return (
         <div className="relative flex w-full">
             <textarea
-                value={value}
-                onChange={onChange}
+                value={localValue}
+                onChange={handleTextChange}
+                onFocus={() => { isFocused.current = true; }}
+                onBlur={(e) => { 
+                    isFocused.current = false;
+                    onChange(e); // 離脱時に同期を確定させる
+                }}
                 className={className}
                 {...props}
             />

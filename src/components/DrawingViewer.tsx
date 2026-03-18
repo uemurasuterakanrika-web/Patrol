@@ -52,7 +52,8 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
         lastScaleFactor: 1.0,
         startX: 0,
         startY: 0,
-        startTime: 0
+        startTime: 0,
+        isTouchingMarker: false
     });
     const renderTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const lastZoomRef = useRef(displayZoom);
@@ -325,6 +326,7 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                 touchState.current.startX = e.touches[0].clientX;
                 touchState.current.startY = e.touches[0].clientY;
                 touchState.current.startTime = Date.now();
+                touchState.current.isTouchingMarker = !!(e.target instanceof Element && e.target.closest('.drawing-marker-pin'));
             }
             if (e.touches.length === 2) {
                 const dist = Math.hypot(
@@ -423,8 +425,8 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                         viewerRef.current.style.willChange = 'auto';
                     }
                 }
-            } else if (e.changedTouches.length === 1 && !readOnly) {
-                // シングルタップによるピン設置
+            } else if (e.changedTouches.length === 1 && !readOnly && !touchState.current.isTouchingMarker) {
+                // シングルタップによるピン設置（ピンを触っていない時のみ）
                 const timeDiff = Date.now() - touchState.current.startTime;
                 const endX = e.changedTouches[0].clientX;
                 const endY = e.changedTouches[0].clientY;
@@ -625,7 +627,7 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                         .map((marker) => (
                         <div
                             key={marker.id}
-                            className="absolute z-[110]"
+                            className="absolute z-[110] drawing-marker-pin"
                             style={{
                                 left: `${marker.x}%`,
                                 top: `${marker.y}%`,

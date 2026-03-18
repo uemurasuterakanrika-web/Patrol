@@ -4,6 +4,7 @@ export interface Site {
   address?: string;
   managerName?: string;
   drawingPdfId?: string;
+  createdAt?: number;
 }
 
 export interface Inspection {

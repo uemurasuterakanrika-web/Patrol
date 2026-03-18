@@ -20,7 +20,8 @@ import {
   Edit2,
   FileUp,
   Pin,
-  Filter
+  Filter,
+  RotateCw
 } from "lucide-react";
 import * as pdfjs from 'pdfjs-dist';
 import { collection, onSnapshot, query, orderBy } from "firebase/firestore";
@@ -37,6 +38,40 @@ import { twMerge } from "tailwind-merge";
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
+
+// 共通画像表示コンポーネント (ID もしくは DataURL を解釈)
+const SafeImage = ({ src, className, alt, onClick, style }: { 
+  src: string; 
+  className?: string; 
+  alt?: string; 
+  onClick?: () => void;
+  style?: React.CSSProperties;
+}) => {
+  const [resolvedSrc, setResolvedSrc] = React.useState<string>('');
+  
+  React.useEffect(() => {
+    if (!src) {
+      setResolvedSrc('');
+      return;
+    }
+    if (src.startsWith('data:')) {
+      setResolvedSrc(src);
+      return;
+    }
+    
+    let isMounted = true;
+    api.getFileUrl(src).then(url => {
+      if (isMounted) setResolvedSrc(url);
+    });
+    return () => { isMounted = false; };
+  }, [src]);
+
+  if (!resolvedSrc) {
+    return <div className={cn("animate-pulse bg-stone-100 flex items-center justify-center", className)} style={style}><Camera className="w-6 h-6 text-stone-300" /></div>;
+  }
+
+  return <img src={resolvedSrc} className={className} alt={alt} onClick={onClick} style={style} />;
+};
 
 export default function App() {
   const [sites, setSites] = useState<Site[]>([]);
@@ -63,6 +98,7 @@ export default function App() {
   const [markerDescription, setMarkerDescription] = useState("");
   const [markerPhoto, setMarkerPhoto] = useState<string | null>(null);
   const [selectedMarkerDetail, setSelectedMarkerDetail] = useState<DrawingMarker | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const onFileSelectedRef = useRef<((file: File) => void) | null>(null);
 
@@ -99,8 +135,11 @@ export default function App() {
   };
   const [isPreviewingPhoto, setIsPreviewingPhoto] = useState<string | null>(null);
   const [isActiveCorrecting, setIsActiveCorrecting] = useState(false);
+  const [isActiveEditingMarker, setIsActiveEditingMarker] = useState(false);
   const [correctiveText, setCorrectiveText] = useState("");
   const [correctivePhoto, setCorrectivePhoto] = useState<string | null>(null);
+  const [tempMarkerDescription, setTempMarkerDescription] = useState("");
+  const [tempMarkerPhoto, setTempMarkerPhoto] = useState<string | null>(null);
   const [inspectionCompleted, setInspectionCompleted] = useState(false);
   const [isPrinting, setIsPrinting] = useState(false);
   const [drawingPages, setDrawingPages] = useState<Record<number, string>>({});
@@ -255,7 +294,7 @@ export default function App() {
 
   useEffect(() => {
     // Sites Listener
-    const qSites = query(collection(db, "sites"), orderBy("name"));
+    const qSites = query(collection(db, "sites"), orderBy("createdAt", "desc"));
     const unsubSites = onSnapshot(qSites, (snapshot) => {
       const sitesData = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Site));
       setSites(sitesData);
@@ -314,6 +353,23 @@ export default function App() {
     setInspections(inspectionsData);
   };
 
+  const handleFileProcess = async (file: File) => {
+    if (file.type !== 'application/pdf') {
+      alert("PDFファイルのみアップロード可能です。");
+      return;
+    }
+    setIsCompressingPdf(true);
+    try {
+      const compressedDataUrl = await compressPdf(file);
+      setNewSiteDrawing(compressedDataUrl);
+    } catch (err) {
+      console.error(err);
+      alert("PDFの最適化に失敗しました。");
+    } finally {
+      setIsCompressingPdf(false);
+    }
+  };
+
   const handleManualItemUpdate = async (itemId: string, updates: Partial<InspectionItem>) => {
     if (!currentInspection) return;
     
@@ -340,21 +396,42 @@ export default function App() {
 
   const handlePhotoUpload = (itemId: string, existingData: Partial<InspectionItem>, isCorrectivePhoto: boolean = false) => {
     triggerUpload((file) => {
-      processImage(file, (dataUrl) => {
-        const updates = { ...existingData };
-        if (isCorrectivePhoto) {
-          updates.correctivePhotoId = dataUrl;
-        } else {
-          updates.photoId = dataUrl;
+      processImage(file, async (dataUrl) => {
+        setIsUploading(true);
+        try {
+          const uploadRes = await api.uploadFile(dataUrl, 'image/jpeg');
+          const updates = { ...existingData };
+          if (isCorrectivePhoto) {
+            updates.correctivePhotoId = uploadRes.id;
+          } else {
+            updates.photoId = uploadRes.id;
+          }
+          handleManualItemUpdate(itemId, updates);
+        } catch (err) {
+          console.error("Photo upload error:", err);
+          alert("写真のアップロードに失敗しました。");
+        } finally {
+          setIsUploading(false);
         }
-        handleManualItemUpdate(itemId, updates);
       });
     });
   };
 
-  const handleMarkerPhotoUpload = (callback: (dataUrl: string) => void) => {
+  const handleMarkerPhotoUpload = (callback: (id: string) => void, onPreview?: (dataUrl: string) => void) => {
     triggerUpload((file) => {
-      processImage(file, callback);
+      processImage(file, async (dataUrl) => {
+        if (onPreview) onPreview(dataUrl);
+        setIsUploading(true);
+        try {
+          const uploadRes = await api.uploadFile(dataUrl, 'image/jpeg');
+          callback(uploadRes.id);
+        } catch (err) {
+          console.error("Marker photo upload error:", err);
+          alert("写真のアップロードに失敗しました。");
+        } finally {
+          setIsUploading(false);
+        }
+      });
     });
   };
 
@@ -410,24 +487,39 @@ export default function App() {
     if (isUploading || !editSiteName.trim()) return;
     try {
       setIsUploading(true);
-      let drawingPdfId = undefined;
-      // If a new drawing was selected during edit, upload it
-      if (newSiteDrawing) {
+      const updates: Partial<Site> = {};
+
+      // 図面の処理
+      if (newSiteDrawing === "") {
+        // 削除指定の場合
+        const originalSite = sites.find(s => s.id === siteId);
+        if (originalSite?.drawingPdfId) {
+          await api.deleteFile(originalSite.drawingPdfId);
+        }
+        updates.drawingPdfId = "";
+      } else if (newSiteDrawing) {
+        // 新しい図面が選択された場合のみアップロードして更新
         if (newSiteDrawing.length > 1048576) {
           alert("図面のデータサイズが大きすぎます。解像度を下げるか、ページ数を減らしてください。");
           return;
         }
         console.log("Updating PDF drawing...");
         const uploadRes = await api.uploadFile(newSiteDrawing);
-        drawingPdfId = uploadRes.id;
+        updates.drawingPdfId = uploadRes.id;
+        
+        // 旧図面があれば削除（上書き時）
+        const originalSite = sites.find(s => s.id === siteId);
+        if (originalSite?.drawingPdfId) {
+          await api.deleteFile(originalSite.drawingPdfId);
+        }
       }
+      // newSiteDrawing が null の場合は drawingPdfId を変更しない（既存の値を保持）
 
       const finalName = editSiteName.trim().endsWith("新築工事") ? editSiteName.trim() : `${editSiteName.trim()} 新築工事`;
-      await api.updateSite(siteId, {
-        name: finalName,
-        managerName: editSiteManager.trim(),
-        drawingPdfId: drawingPdfId
-      });
+      updates.name = finalName;
+      updates.managerName = editSiteManager.trim();
+
+      await api.updateSite(siteId, updates);
       setEditingSiteId(null);
       setEditSiteName("");
       setEditSiteManager("");
@@ -441,6 +533,7 @@ export default function App() {
       setIsUploading(false);
     }
   };
+
 
   const handleDeleteSite = async (e: React.MouseEvent, siteId: string) => {
     if (!confirm("【警告】この現場自体を完全に削除しますか？")) return;
@@ -614,37 +707,59 @@ export default function App() {
             </div>
           </div>
 
+          <button
+            onClick={() => window.location.reload()}
+            className="p-2.5 hover:bg-stone-100 rounded-xl text-stone-400 flex items-center justify-center transition-colors active:scale-95"
+            title="最新の情報に更新（再読み込み）"
+          >
+            <RotateCw className="w-5 h-5" />
+          </button>
+
         </header>
 
         <div className="flex-1 overflow-hidden flex flex-col">
-          <div className="flex-1 overflow-y-auto p-4 space-y-6 bg-stone-50">
-            {!currentInspection ? (
-              <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-4">
-                <div className="w-20 h-20 bg-emerald-50 rounded-3xl flex items-center justify-center">
+          {!currentInspection ? (
+            <div className="flex-1 w-full bg-stone-50 overflow-y-auto">
+              <div className="max-w-sm w-full mx-auto py-10 px-4 flex flex-col items-center">
+                <div className="w-20 h-20 shrink-0 bg-emerald-50 rounded-3xl flex items-center justify-center mt-4">
                   <HardHat className="w-10 h-10 text-emerald-600" />
                 </div>
-                <div>
+                <div className="mt-4 text-center">
                   <h3 className="text-xl font-bold text-stone-800">点検を開始しましょう</h3>
-                  <p className="text-stone-500 max-w-xs mx-auto mt-2">現場を選択して点検を開始してください。</p>
+                  <p className="text-stone-500 text-sm max-w-xs mx-auto mt-1 mb-2">現場を選択して点検を開始してください。</p>
                 </div>
-
-                <div className="grid grid-cols-1 gap-3 w-full max-w-sm mt-4">
+              
+                <div className="w-full flex flex-col gap-3 mt-8 pb-24 text-left">
                   {sites.map(site => (
                     <div key={site.id} className="relative group/site">
                       {editingSiteId === site.id ? (
-                        <div className="p-3 bg-white border border-emerald-400 rounded-2xl shadow-sm space-y-2">
+                        <div 
+                          className={cn(
+                            "p-3 bg-white border rounded-2xl shadow-sm space-y-2 transition-all",
+                            editingSiteId === site.id ? "border-emerald-400" : "border-stone-200",
+                            isDragging && "bg-emerald-50/50 border-emerald-600 scale-[1.02] border-2"
+                          )}
+                          onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                          onDragLeave={() => setIsDragging(false)}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            setIsDragging(false);
+                            const file = e.dataTransfer.files?.[0];
+                            if (file) handleFileProcess(file);
+                          }}
+                        >
                           <VoiceInput
                             autoFocus
                             value={editSiteName}
                             onChange={(e) => setEditSiteName(e.target.value)}
-                            className="w-full text-sm font-medium border-none p-0 focus:ring-0 outline-none"
+                            className="w-full text-sm font-medium border-none p-0 focus:ring-0 outline-none bg-transparent"
                             placeholder="現場名"
                           />
                           <VoiceInput
                             value={editSiteManager}
                             onChange={(e) => setEditSiteManager(e.target.value)}
                             placeholder="現場担当者..."
-                            className="w-full text-xs text-stone-500 border-none p-0 focus:ring-0 outline-none"
+                            className="w-full text-xs text-stone-500 border-none p-0 focus:ring-0 outline-none bg-transparent"
                           />
                           <div className="flex items-center gap-2 pt-1">
                             <FileUp className="w-3 h-3 text-emerald-500" />
@@ -653,35 +768,37 @@ export default function App() {
                                 const input = document.createElement('input');
                                 input.type = 'file';
                                 input.accept = 'application/pdf';
-                                input.onchange = async (e: any) => {
+                                input.onchange = (e: any) => {
                                   const file = e.target.files?.[0];
-                                  if (!file) return;
-                                  setIsCompressingPdf(true);
-                                  try {
-                                    const compressedDataUrl = await compressPdf(file);
-                                    setNewSiteDrawing(compressedDataUrl);
-                                  } catch (err) {
-                                    console.error(err);
-                                    alert("PDFの読み込み・最適化に失敗しました。");
-                                  } finally {
-                                    setIsCompressingPdf(false);
-                                  }
+                                  if (file) handleFileProcess(file);
                                 };
                                 input.click();
                               }}
                               className={cn(
-                                "text-[9px] px-2 py-1 rounded border border-dashed",
-                                isCompressingPdf ? "bg-stone-100 border-stone-300 text-stone-500 cursor-wait" : newSiteDrawing ? "bg-emerald-50 border-emerald-300 text-emerald-700" : "bg-stone-50 border-stone-200 text-stone-500"
+                                "text-[9px] px-2 py-1 rounded border border-dashed flex-1 text-left",
+                                isCompressingPdf ? "bg-stone-100 border-stone-300 text-stone-500 cursor-wait" : newSiteDrawing === "" ? "bg-rose-50 border-rose-200 text-rose-600" : newSiteDrawing ? "bg-emerald-50 border-emerald-300 text-emerald-700" : "bg-stone-50 border-stone-200 text-stone-500 hover:border-emerald-200"
                               )}
                               disabled={isCompressingPdf}
                               title="図面PDFをアップロード"
                             >
-                              {isCompressingPdf ? "PDF最適化中..." : newSiteDrawing ? "図面更新待機中" : "図面を変更（任意）"}
+                              {isDragging ? "ここにドロップで更新" : isCompressingPdf ? "PDF最適化中..." : newSiteDrawing === "" ? "図面を削除します" : newSiteDrawing ? "図面を更新（待機中）" : site.drawingPdfId ? "図面を差し替え" : "図面を添付またはドロップ"}
                             </button>
+                            {(newSiteDrawing || (site.drawingPdfId && newSiteDrawing !== "")) && (
+                              <button 
+                                onClick={() => setNewSiteDrawing(newSiteDrawing === "" ? null : "")}
+                                className={cn(
+                                  "p-1.5 rounded-lg border border-rose-200 text-rose-500 hover:bg-rose-50",
+                                  newSiteDrawing === "" && "bg-rose-100 border-rose-400"
+                                )}
+                                title={newSiteDrawing === "" ? "削除を取り消す" : "図面を削除"}
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            )}
                           </div>
                           <div className="flex gap-2">
                             <button onClick={() => handleUpdateSite(site.id)} className="flex-1 bg-emerald-600 text-white text-[10px] font-bold py-1.5 rounded-lg" title="保存">保存</button>
-                            <button onClick={() => { setEditingSiteId(null); setNewSiteDrawing(null); }} className="flex-1 bg-stone-100 text-stone-600 text-[10px] font-bold py-1.5 rounded-lg" title="中止">中止</button>
+                            <button onClick={() => { setEditingSiteId(null); setNewSiteDrawing(null); setIsDragging(false); }} className="flex-1 bg-stone-100 text-stone-600 text-[10px] font-bold py-1.5 rounded-lg" title="中止">中止</button>
                           </div>
                         </div>
                       ) : (
@@ -691,14 +808,17 @@ export default function App() {
                             className="w-full p-4 rounded-2xl border border-stone-200 bg-white hover:border-emerald-400 text-left flex items-center gap-4 group"
                             title="履歴・点検開始"
                           >
-                            <div className="w-10 h-10 rounded-xl bg-stone-50 flex items-center justify-center text-stone-400 group-hover:bg-emerald-50 group-hover:text-emerald-500">
-                              <MapPin className="w-5 h-5" />
+                            <div className="w-10 h-10 min-w-[2.5rem] min-h-[2.5rem] shrink-0 rounded-xl bg-stone-50 flex items-center justify-center text-stone-400 group-hover:bg-emerald-50 group-hover:text-emerald-500">
+                              <MapPin className="w-5 h-5 shrink-0" />
                             </div>
-                            <div className="flex-1">
-                              <div className="font-bold text-stone-800 leading-tight">{site.name}</div>
-                              <div className="text-xs text-stone-500">{site.managerName || '担当者未設定'}</div>
+                            <div className="flex-1 min-w-0 overflow-hidden">
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <div className="font-bold text-stone-800 leading-tight truncate">{site.name}</div>
+                                {site.drawingPdfId && <span title="図面登録済み"><FileText className="w-3 h-3 text-emerald-500 shrink-0" /></span>}
+                              </div>
+                              <div className="text-xs text-stone-500 truncate">{site.managerName || '担当者未設定'}</div>
                             </div>
-                            <ChevronRight className="w-4 h-4 text-stone-300 group-hover:text-emerald-400" />
+                            <ChevronRight className="w-4 h-4 shrink-0 min-w-[1rem] min-h-[1rem] text-stone-300 group-hover:text-emerald-400" />
                           </button>
                           <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover/site:opacity-100">
                             <button onClick={() => { setEditingSiteId(site.id); setEditSiteName(site.name); setEditSiteManager(site.managerName || ""); }} className="p-1.5 bg-white border border-stone-200 rounded-lg text-stone-400 hover:text-emerald-600" title="編集"><Edit2 className="w-3 h-3" /></button>
@@ -709,11 +829,24 @@ export default function App() {
                     </div>
                   ))}
 
-                  {isAddingSite ? (
-                    <div className="p-4 rounded-2xl border border-emerald-400 bg-white space-y-3">
+                   {isAddingSite ? (
+                    <div 
+                      className={cn(
+                        "p-4 rounded-2xl border border-emerald-400 bg-white space-y-3 shrink-0 transition-all",
+                        isDragging && "bg-emerald-50/50 border-emerald-600 scale-[1.02] border-2"
+                      )}
+                      onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                      onDragLeave={() => setIsDragging(false)}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        setIsDragging(false);
+                        const file = e.dataTransfer.files?.[0];
+                        if (file) handleFileProcess(file);
+                      }}
+                    >
                       <div className="space-y-2">
                         <div className="flex items-center gap-3">
-                          <MapPin className="w-5 h-5 text-emerald-500" />
+                          <MapPin className="w-5 h-5 min-w-[1.25rem] min-h-[1.25rem] shrink-0 text-emerald-500" />
                           <VoiceInput
                             autoFocus
                             placeholder="新しい現場名を入力..."
@@ -723,7 +856,7 @@ export default function App() {
                           />
                         </div>
                         <div className="flex items-center gap-3">
-                          <User className="w-5 h-5 text-emerald-500" />
+                          <User className="w-5 h-5 min-w-[1.25rem] min-h-[1.25rem] shrink-0 text-emerald-500" />
                           <VoiceInput
                             placeholder="現場担当者名を入力..."
                             className="flex-1 outline-none text-stone-800 font-medium"
@@ -732,48 +865,47 @@ export default function App() {
                           />
                         </div>
                         <div className="flex items-center gap-3">
-                          <FileUp className="w-5 h-5 text-emerald-500" />
+                          <FileUp className="w-5 h-5 min-w-[1.25rem] min-h-[1.25rem] shrink-0 text-emerald-500" />
                           <button
                             onClick={() => {
                               const input = document.createElement('input');
                               input.type = 'file';
                               input.accept = 'application/pdf';
-                              input.onchange = async (e: any) => {
+                              input.onchange = (e: any) => {
                                 const file = e.target.files?.[0];
-                                if (!file) return;
-                                setIsCompressingPdf(true);
-                                try {
-                                  const compressedDataUrl = await compressPdf(file);
-                                  setNewSiteDrawing(compressedDataUrl);
-                                } catch (err) {
-                                  console.error(err);
-                                  alert("PDFの最適化に失敗しました。");
-                                } finally {
-                                  setIsCompressingPdf(false);
-                                }
+                                if (file) handleFileProcess(file);
                               };
                               input.click();
                             }}
                             className={cn(
-                              "text-xs px-3 py-1.5 rounded-lg border border-dashed",
+                              "text-xs px-3 py-1.5 rounded-lg border border-dashed flex-1 text-left",
                               isCompressingPdf ? "bg-stone-100 border-stone-300 text-stone-500 cursor-wait" : newSiteDrawing ? "bg-emerald-50 border-emerald-300 text-emerald-700" : "bg-stone-50 border-stone-200 text-stone-500 hover:border-emerald-200"
                             )}
                             disabled={isCompressingPdf}
                             title="図面PDFを選択"
                           >
-                            {isCompressingPdf ? "PDF最適化中..." : newSiteDrawing ? "図面PDF添付済み" : "図面PDFを添付（任意）"}
+                            {isDragging ? "ここにドロップして添付" : isCompressingPdf ? "PDF最適化中..." : newSiteDrawing ? "図面PDF添付済み" : "図面PDFを添付またはドロップ（任意）"}
                           </button>
+                          {newSiteDrawing && (
+                            <button 
+                              onClick={() => setNewSiteDrawing(null)}
+                              className="p-2 border border-rose-200 text-rose-500 rounded-lg hover:bg-rose-50"
+                              title="添付を解除"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
                         </div>
                       </div>
                       <div className="flex gap-2">
                         <button onClick={handleCreateSite} className="flex-1 bg-emerald-600 text-white py-2 rounded-xl font-bold text-sm" title="現場を作成">追加</button>
-                        <button onClick={() => setIsAddingSite(false)} className="flex-1 bg-stone-100 text-stone-600 py-2 rounded-xl font-bold text-sm" title="キャンセル">中止</button>
+                        <button onClick={() => { setIsAddingSite(false); setIsDragging(false); }} className="flex-1 bg-stone-100 text-stone-600 py-2 rounded-xl font-bold text-sm" title="キャンセル">中止</button>
                       </div>
                     </div>
                   ) : (
                     <button onClick={() => setIsAddingSite(true)} className="w-full p-4 rounded-2xl border border-dashed border-stone-300 text-stone-400 hover:border-emerald-400 hover:text-emerald-600 hover:bg-emerald-50 flex items-center justify-center gap-2" title="新規現場登録">
-                      <Plus className="w-5 h-5" />
-                      <span className="font-medium">新しい現場を追加</span>
+                      <Plus className="w-5 h-5 min-w-[1.25rem] min-h-[1.25rem] shrink-0" />
+                      <span className="font-medium shrink-0">新しい現場を追加</span>
                     </button>
                   )}
                 </div>
@@ -795,7 +927,7 @@ export default function App() {
                             <p className="text-sm text-stone-500">{viewingSiteHistory.managerName || '担当者未設定'}</p>
                           </div>
                         </div>
-                        <button onClick={() => setViewingSiteHistory(null)} className="p-2 hover:bg-stone-100 rounded-full text-stone-400">
+                        <button onClick={() => setViewingSiteHistory(null)} className="p-2 hover:bg-stone-100 rounded-full text-stone-400" title="閉じる">
                           <X className="w-5 h-5" />
                         </button>
                       </div>
@@ -877,8 +1009,10 @@ export default function App() {
                     </section>
                   </div>
                 )}
+                </div>
               </div>
             ) : (
+            <div className="flex-1 overflow-y-auto p-4 space-y-6 bg-stone-50">
               <div className="space-y-6 max-w-3xl mx-auto">
                 <h1 className="hidden print:block text-2xl font-bold text-center mb-6">現場パトロール点検報告書</h1>
                 {/* Header Info Card */}
@@ -1029,7 +1163,7 @@ export default function App() {
                                       <Pin className="w-5 h-5" />
                                       指摘の追加
                                     </h3>
-                                    <button onClick={() => setActiveMarkerInput(null)} className="p-1 hover:bg-white/20 rounded-full">
+                                    <button onClick={() => setActiveMarkerInput(null)} className="p-1 hover:bg-white/20 rounded-full" title="キャンセル">
                                       <X className="w-5 h-5" />
                                     </button>
                                   </div>
@@ -1050,14 +1184,14 @@ export default function App() {
                                     <div className="space-y-1.5">
                                       <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider">現場写真</label>
                                       <div 
-                                        onClick={() => handleMarkerPhotoUpload(setMarkerPhoto)}
+                                        onClick={() => handleMarkerPhotoUpload(setMarkerPhoto, (dataUrl) => setMarkerPhoto(dataUrl))}
                                         className={cn(
                                           "w-full aspect-video rounded-2xl border-2 border-dashed flex flex-col items-center justify-center cursor-pointer overflow-hidden",
                                           markerPhoto ? "border-emerald-300 bg-emerald-50" : "border-stone-200 bg-stone-50 hover:border-emerald-200"
                                         )}
                                       >
                                         {markerPhoto ? (
-                                          <img src={markerPhoto} className="w-full h-full object-cover" alt="Selected" />
+                                          <SafeImage src={markerPhoto} className="w-full h-full object-cover" alt="Selected" />
                                         ) : (
                                           <>
                                             <Camera className="w-8 h-8 text-stone-300 mb-2" />
@@ -1124,7 +1258,7 @@ export default function App() {
                                   <div className="flex-1 overflow-y-auto overflow-x-hidden rounded-3xl custom-scrollbar">
                                     <div className="relative aspect-video bg-stone-100 cursor-zoom-in group">
                                       {selectedMarkerDetail.issuePhotoId ? (
-                                        <img 
+                                        <SafeImage 
                                           src={selectedMarkerDetail.issuePhotoId} 
                                           className="w-full h-full object-cover group-hover:opacity-90" 
                                           alt="指摘写真" 
@@ -1185,24 +1319,48 @@ export default function App() {
                                                 const input = document.createElement('input');
                                                 input.type = 'file';
                                                 input.accept = 'image/*';
-                                                input.onchange = (e: any) => {
+                                                input.onchange = async (e: any) => {
                                                   const file = e.target.files?.[0];
                                                   if (!file) return;
-                                                  const reader = new FileReader();
-                                                  reader.onload = (event) => {
-                                                    const img = new Image();
-                                                    img.onload = () => {
-                                                      const canvas = document.createElement('canvas');
-                                                      const MAX = 1000;
-                                                      let w = img.width, h = img.height;
-                                                      if (w > h) { if (w > MAX) { h *= MAX / w; w = MAX; } } else { if (h > MAX) { w *= MAX / h; h = MAX; } }
-                                                      canvas.width = w; canvas.height = h;
-                                                      const ctx = canvas.getContext('2d');
-                                                      if (ctx) { ctx.drawImage(img, 0, 0, w, h); setCorrectivePhoto(canvas.toDataURL('image/jpeg', 0.6)); }
+                                                  
+                                                  setIsUploading(true);
+                                                  try {
+                                                    const compressAndUpload = (fileObj: File) => {
+                                                      return new Promise<string>((resolve, reject) => {
+                                                        const img = new Image();
+                                                        img.onload = async () => {
+                                                          const canvas = document.createElement('canvas');
+                                                          const MAX = 1000;
+                                                          let w = img.width, h = img.height;
+                                                          if (w > h) { if (w > MAX) { h *= MAX / w; w = MAX; } } else { if (h > MAX) { w *= MAX / h; h = MAX; } }
+                                                          canvas.width = w; canvas.height = h;
+                                                          const ctx = canvas.getContext('2d');
+                                                          if (ctx) { 
+                                                            ctx.drawImage(img, 0, 0, w, h); 
+                                                            const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+                                                            try {
+                                                              const uploadRes = await api.uploadFile(dataUrl, 'image/jpeg');
+                                                              resolve(uploadRes.id);
+                                                            } catch (err) {
+                                                              reject(err);
+                                                            }
+                                                          } else {
+                                                            reject(new Error("Canvas context error"));
+                                                          }
+                                                        };
+                                                        img.onerror = () => reject(new Error("Image load error"));
+                                                        img.src = URL.createObjectURL(fileObj);
+                                                      });
                                                     };
-                                                    img.src = event.target?.result as string;
-                                                  };
-                                                  reader.readAsDataURL(file);
+                                                    
+                                                    const fileId = await compressAndUpload(file);
+                                                    setCorrectivePhoto(fileId);
+                                                  } catch (err) {
+                                                    console.error("Manual corrective photo upload error:", err);
+                                                    alert("写真のアップロードに失敗しました。");
+                                                  } finally {
+                                                    setIsUploading(false);
+                                                  }
                                                 };
                                                 input.click();
                                               }}
@@ -1212,7 +1370,7 @@ export default function App() {
                                               )}
                                             >
                                               {correctivePhoto ? (
-                                                <img src={correctivePhoto} className="w-full h-full object-cover" alt="Corrective" />
+                                                <SafeImage src={correctivePhoto} className="w-full h-full object-cover" alt="Corrective" />
                                               ) : (
                                                 <Camera className="w-8 h-8 text-stone-300" />
                                               )}
@@ -1254,7 +1412,7 @@ export default function App() {
                                                     onClick={() => setIsPreviewingPhoto(selectedMarkerDetail.correctivePhotoId!)}
                                                     className="w-full aspect-video rounded-xl overflow-hidden border border-emerald-200"
                                                   >
-                                                    <img src={selectedMarkerDetail.correctivePhotoId} className="w-full h-full object-cover" alt="処置写真" />
+                                                    <SafeImage src={selectedMarkerDetail.correctivePhotoId} className="w-full h-full object-cover" alt="処置写真" />
                                                   </button>
                                                   <button 
                                                     onClick={(e) => {
@@ -1282,30 +1440,97 @@ export default function App() {
                                           <div className="flex gap-2 pt-2">
                                             <button
                                               onClick={() => {
-                                                setCorrectiveText(selectedMarkerDetail.correctiveAction || "");
-                                                setCorrectivePhoto(selectedMarkerDetail.correctivePhotoId || null);
-                                                setIsActiveCorrecting(true);
+                                                setTempMarkerDescription(selectedMarkerDetail.description || "");
+                                                setTempMarkerPhoto(selectedMarkerDetail.issuePhotoId || null);
+                                                setIsActiveEditingMarker(true);
                                               }}
                                               className="flex-1 py-3 bg-stone-100 text-stone-700 rounded-xl font-bold text-sm hover:bg-stone-200 flex items-center justify-center gap-2"
                                             >
                                               <Edit2 className="w-4 h-4" />
-                                              処置内容
+                                              指摘を編集
+                                            </button>
+                                            <button
+                                              onClick={() => {
+                                                setCorrectiveText(selectedMarkerDetail.correctiveAction || "");
+                                                setCorrectivePhoto(selectedMarkerDetail.correctivePhotoId || null);
+                                                setIsActiveCorrecting(true);
+                                              }}
+                                              className="flex-1 py-3 bg-emerald-600 text-white rounded-xl font-bold text-sm hover:bg-emerald-700 shadow-md flex items-center justify-center gap-2"
+                                            >
+                                              <CheckCircle2 className="w-4 h-4" />
+                                              処置入力
                                             </button>
                                             <button
                                               onClick={() => handleDeleteMarker(selectedMarkerDetail.id)}
-                                              className="w-12 h-12 flex items-center justify-center bg-rose-50 text-rose-500 rounded-xl hover:bg-rose-100"
+                                              className="w-12 h-12 flex items-center justify-center bg-rose-50 text-rose-500 rounded-xl hover:bg-rose-100 shrink-0"
                                               title="削除"
                                             >
                                               <Trash2 className="w-5 h-5" />
                                             </button>
-                                            <button
-                                              onClick={() => setSelectedMarkerDetail(null)}
-                                              className="flex-1 py-3 bg-emerald-600 text-white rounded-xl font-bold text-sm hover:bg-emerald-700 shadow-md"
-                                            >
-                                              閉じる
-                                            </button>
                                           </div>
                                         </>
+                                      )}
+
+                                      {/* 指摘自体の編集画面 */}
+                                      {isActiveEditingMarker && (
+                                        <div className="space-y-4 absolute inset-0 z-[10020] bg-white p-6 overflow-y-auto rounded-3xl">
+                                          <div className="flex items-center justify-between mb-2">
+                                            <h4 className="text-lg font-bold text-stone-800">指摘内容を編集</h4>
+                                            <button onClick={() => setIsActiveEditingMarker(false)} className="p-2 hover:bg-stone-100 rounded-full text-stone-400">
+                                              <X className="w-5 h-5" />
+                                            </button>
+                                          </div>
+
+                                          <div className="space-y-1.5">
+                                            <label className="text-[10px] font-bold text-stone-500 uppercase tracking-widest">指摘内容</label>
+                                            <VoiceTextarea 
+                                              autoFocus
+                                              value={tempMarkerDescription}
+                                              onChange={(e) => setTempMarkerDescription(e.target.value)}
+                                              placeholder="指摘事項を入力してください"
+                                              className="w-full bg-stone-50 border-stone-100 rounded-xl px-4 py-3 text-base min-h-[100px]"
+                                              rows={3}
+                                            />
+                                          </div>
+
+                                          <div className="space-y-1.5">
+                                            <label className="text-[10px] font-bold text-stone-500 uppercase tracking-widest">指摘写真（任意）</label>
+                                            <div 
+                                              onClick={() => handleMarkerPhotoUpload((id) => setTempMarkerPhoto(id), (dataUrl) => setTempMarkerPhoto(dataUrl))}
+                                              className={cn(
+                                                "w-full aspect-video rounded-2xl border-2 border-dashed flex flex-col items-center justify-center cursor-pointer overflow-hidden",
+                                                tempMarkerPhoto ? "border-emerald-300 bg-emerald-50" : "border-stone-200 bg-stone-50"
+                                              )}
+                                            >
+                                              {tempMarkerPhoto ? (
+                                                <SafeImage src={tempMarkerPhoto} className="w-full h-full object-cover" alt="Temp Issue" />
+                                              ) : (
+                                                <div className="flex flex-col items-center">
+                                                  <Camera className="w-8 h-8 text-stone-300 mb-1" />
+                                                  <span className="text-[10px] text-stone-400">タップで写真を撮影/選択</span>
+                                                </div>
+                                              )}
+                                            </div>
+                                            {tempMarkerPhoto && (
+                                              <button onClick={() => setTempMarkerPhoto(null)} className="text-rose-500 text-[10px] font-bold pt-1">写真を削除</button>
+                                            )}
+                                          </div>
+
+                                          <button
+                                            onClick={() => {
+                                              handleUpdateMarker(selectedMarkerDetail.id, {
+                                                description: tempMarkerDescription,
+                                                issuePhotoId: tempMarkerPhoto || undefined
+                                              });
+                                              setIsActiveEditingMarker(false);
+                                              setSelectedMarkerDetail(null);
+                                            }}
+                                            disabled={!tempMarkerDescription.trim()}
+                                            className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold hover:bg-emerald-700 disabled:opacity-50 shadow-lg mt-4"
+                                          >
+                                            修正を保存
+                                          </button>
+                                        </div>
                                       )}
                                     </div>
                                   </div>
@@ -1322,7 +1547,7 @@ export default function App() {
                                   <div
                                     className="relative max-w-5xl w-full h-full flex items-center justify-center"
                                   >
-                                    <img 
+                                    <SafeImage 
                                       src={isPreviewingPhoto} 
                                       className="max-w-full max-h-full object-contain rounded-lg shadow-2xl" 
                                       alt="プレビュー" 
@@ -1438,7 +1663,7 @@ export default function App() {
                                     title="指摘写真を撮影・選択"
                                   >
                                     {result?.photoId ? (
-                                      <img src={result.photoId} className="w-full h-full object-cover" alt="状況写真" />
+                                      <SafeImage src={result.photoId} className="w-full h-full object-cover" alt="状況写真" />
                                     ) : (
                                       <>
                                         <Camera className="w-6 h-6" />
@@ -1467,7 +1692,7 @@ export default function App() {
                                     title="是正写真を撮影・選択"
                                   >
                                     {result?.correctivePhotoId ? (
-                                      <img src={result.correctivePhotoId} className="w-full h-full object-cover" alt="是正写真" />
+                                      <SafeImage src={result.correctivePhotoId} className="w-full h-full object-cover" alt="是正写真" />
                                     ) : (
                                       <>
                                         <Camera className="w-6 h-6" />
@@ -1485,8 +1710,8 @@ export default function App() {
                   </div>
                 </section>
               </div>
+              </div>
             )}
-          </div>
         </div>
       </main>
     </div>
@@ -1631,22 +1856,22 @@ export default function App() {
                   </div>
                   
                   {/* ピンに紐づく写真を表示 */}
-                  {(marker.issuePhotoId || marker.correctivePhotoId) && (
-                    <div className="report-photo-grid cols-2" style={{ marginTop: '4mm' }}>
-                      {marker.issuePhotoId && (
-                        <div className="report-photo-container">
-                          <img src={marker.issuePhotoId} alt="指摘状況" style={{ height: '5.5cm' }} />
-                          <div className="report-photo-caption">【No.{marker.label}】指摘状況</div>
-                        </div>
-                      )}
-                      {marker.correctivePhotoId && (
-                        <div className="report-photo-container">
-                          <img src={marker.correctivePhotoId} alt="是正完了" style={{ height: '5.5cm' }} />
-                          <div className="report-photo-caption">【No.{marker.label}】是正完了</div>
-                        </div>
-                      )}
-                    </div>
-                  )}
+                    {(marker.issuePhotoId || marker.correctivePhotoId) && (
+                      <div className="report-photo-grid cols-2" style={{ marginTop: '4mm' }}>
+                        {marker.issuePhotoId && (
+                          <div className="report-photo-container">
+                            <SafeImage src={marker.issuePhotoId} alt="指摘状況" style={{ height: '5.5cm' }} />
+                            <div className="report-photo-caption">【No.{marker.label}】指摘状況</div>
+                          </div>
+                        )}
+                        {marker.correctivePhotoId && (
+                          <div className="report-photo-container">
+                            <SafeImage src={marker.correctivePhotoId} alt="是正完了" style={{ height: '5.5cm' }} />
+                            <div className="report-photo-caption">【No.{marker.label}】是正完了</div>
+                          </div>
+                        )}
+                      </div>
+                    )}
                 </div>
               ))}
             </div>
@@ -1664,13 +1889,13 @@ export default function App() {
                   <React.Fragment key={res.itemId}>
                     {res.photoId && (
                       <div className="report-photo-container">
-                        <img src={res.photoId} alt="状況写真" />
+                        <SafeImage src={res.photoId} alt="状況写真" />
                         <div className="report-photo-caption">【{master?.label}】指摘状況</div>
                       </div>
                     )}
                     {res.correctivePhotoId && (
                       <div className="report-photo-container">
-                        <img src={res.correctivePhotoId} alt="是正写真" />
+                        <SafeImage src={res.correctivePhotoId} alt="是正写真" />
                         <div className="report-photo-caption">【{master?.label}】是正完了</div>
                       </div>
                     )}
