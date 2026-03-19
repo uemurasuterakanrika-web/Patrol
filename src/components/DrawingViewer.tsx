@@ -1,16 +1,26 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
 import { DrawingMarker } from '../types';
-import { X, Camera, MessageSquare, Loader2, AlertCircle, CheckCircle2, ZoomIn, ZoomOut, Maximize, FileUp, ChevronLeft, ChevronRight } from 'lucide-react';
+import { X, Camera, MessageSquare, Loader2, AlertCircle, CheckCircle2, ZoomIn, ZoomOut, Maximize, FileUp, ChevronLeft, ChevronRight, Pen, Pin, Eraser, Trash2, Undo2, Minus } from 'lucide-react';
 import * as pdfjs from 'pdfjs-dist';
 
 // -------------------------------------------------------------------------
 // COMPONENT: DrawingViewer
 // -------------------------------------------------------------------------
 // 独自の堅牢なPDFビューア実装（@react-pdf-viewer のバグや依存を排除）
+// ＋ ペン書き込み機能（SVGレイヤー）
 // -------------------------------------------------------------------------
 
 // PDF.js worker の設定
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.js`;
+
+export interface StrokePoint { x: number; y: number; }
+export interface Stroke {
+  id: string;
+  points: StrokePoint[];
+  color: string;
+  width: number;
+  page: number;
+}
 
 interface DrawingViewerProps {
     fileUrl: string;
@@ -20,6 +30,39 @@ interface DrawingViewerProps {
     onSelectMarker?: (marker: DrawingMarker) => void;
     readOnly?: boolean;
     className?: string;
+    // ペン書き込み
+    strokes?: Stroke[];
+    onStrokesChange?: (strokes: Stroke[]) => void;
+}
+
+// ペンモード用カラーパレット
+const PEN_COLORS = [
+  { value: '#ef4444', label: '赤' },
+  { value: '#f97316', label: 'オレンジ' },
+  { value: '#eab308', label: '黄' },
+  { value: '#22c55e', label: '緑' },
+  { value: '#3b82f6', label: '青' },
+  { value: '#8b5cf6', label: '紫' },
+  { value: '#1e293b', label: '黒' },
+];
+
+const PEN_WIDTHS = [2, 5, 10];
+
+// SVGパスを生成（スムーズな曲線）
+function buildPath(points: StrokePoint[]): string {
+  if (points.length < 2) {
+    const p = points[0];
+    return `M ${p.x} ${p.y} L ${p.x + 0.1} ${p.y + 0.1}`;
+  }
+  let d = `M ${points[0].x} ${points[0].y}`;
+  for (let i = 1; i < points.length - 1; i++) {
+    const cx = (points[i].x + points[i + 1].x) / 2;
+    const cy = (points[i].y + points[i + 1].y) / 2;
+    d += ` Q ${points[i].x} ${points[i].y} ${cx} ${cy}`;
+  }
+  const last = points[points.length - 1];
+  d += ` L ${last.x} ${last.y}`;
+  return d;
 }
 
 export const DrawingViewer: React.FC<DrawingViewerProps> = ({
@@ -29,15 +72,18 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
     onRemoveMarker,
     onSelectMarker,
     readOnly = false,
-    className
+    className,
+    strokes: externalStrokes,
+    onStrokesChange,
 }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
+    const svgRef = useRef<SVGSVGElement>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [pdfDimensions, setPdfDimensions] = useState({ width: 0, height: 0 });
-    const [displayZoom, setDisplayZoom] = useState(1.0); // 画面表示用の即時ズーム
-    const [renderZoom, setRenderZoom] = useState(1.0);   // レンダリング用の確定ズーム
+    const [displayZoom, setDisplayZoom] = useState(1.0);
+    const [renderZoom, setRenderZoom] = useState(1.0);
     const [isPinching, setIsPinching] = useState(false);
     const [pdfPage, setPdfPage] = useState<pdfjs.PDFPageProxy | null>(null);
     const [pdfDoc, setPdfDoc] = useState<pdfjs.PDFDocumentProxy | null>(null);
@@ -61,11 +107,37 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
     const viewerRef = useRef<HTMLDivElement>(null);
     const preZoomScrollRef = useRef<{ x: number, y: number } | null>(null);
 
+    // --- ペン書き込み state ---
+    const [mode, setMode] = useState<'pin' | 'pen' | 'eraser'>('pin');
+    const [penColor, setPenColor] = useState('#ef4444');
+    const [penWidth, setPenWidth] = useState(5);
+    const [strokes, setStrokes] = useState<Stroke[]>(externalStrokes || []);
+    const [currentStroke, setCurrentStroke] = useState<StrokePoint[] | null>(null);
+    const isDrawingRef = useRef(false);
+    const currentStrokeRef = useRef<StrokePoint[]>([]);
+    const penColorRef = useRef(penColor);
+    const penWidthRef = useRef(penWidth);
+    const currentPageRef = useRef(currentPage);
+
+    // 外部から渡された strokes と同期
+    useEffect(() => {
+        if (externalStrokes !== undefined) setStrokes(externalStrokes);
+    }, [externalStrokes]);
+
+    // refを最新stateと同期
+    useEffect(() => { penColorRef.current = penColor; }, [penColor]);
+    useEffect(() => { penWidthRef.current = penWidth; }, [penWidth]);
+    useEffect(() => { currentPageRef.current = currentPage; }, [currentPage]);
+
+    const notifyStrokes = useCallback((newStrokes: Stroke[]) => {
+        setStrokes(newStrokes);
+        onStrokesChange?.(newStrokes);
+    }, [onStrokesChange]);
+
     // コンテナのリサイズを監視
     useEffect(() => {
         const container = containerRef.current;
         if (!container) return;
-
         const observer = new ResizeObserver((entries) => {
             for (const entry of entries) {
                 setContainerSize({
@@ -74,12 +146,11 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                 });
             }
         });
-
         observer.observe(container);
         return () => observer.disconnect();
     }, []);
 
-    // ズーム時に中心を維持するためのスクロール調整
+    // ズーム時に中心を維持
     useLayoutEffect(() => {
         const container = containerRef.current;
         if (!container || !pdfDimensions.width || lastZoomRef.current === displayZoom) {
@@ -90,13 +161,11 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
         const viewportWidth = container.clientWidth;
         const viewportHeight = container.clientHeight;
         
-        // CSS Transformによる見た目のズームを実際のレイアウトに適用するタイミングでリセット
         if (viewerRef.current) {
             viewerRef.current.style.transform = 'none';
             viewerRef.current.style.willChange = 'auto';
         }
 
-        // ズーム前の状態での画面中央のスクロール位置(純粋なピクセルベース)
         let oldScrollX = container.scrollLeft;
         let oldScrollY = container.scrollTop;
         if (preZoomScrollRef.current) {
@@ -105,17 +174,13 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
             preZoomScrollRef.current = null;
         }
         
-        // ズーム前後の倍率の比率
         const scaleRatio = displayZoom / lastZoomRef.current;
 
-        // 新しいスクロール位置を比率から計算して中心が同じになるようにする
-        // ピンチズーム直後の場合はピンチの中心を、ボタン押下などの場合は画面の中央を基準にする
         let cx = viewportWidth / 2;
         let cy = viewportHeight / 2;
         if (touchState.current.pinchOriginX > 0 || touchState.current.pinchOriginY > 0) {
             cx = touchState.current.pinchOriginX;
             cy = touchState.current.pinchOriginY;
-            // 次回のボタン押下時は再度中央基準に戻るようにリセット
             touchState.current.pinchOriginX = 0;
             touchState.current.pinchOriginY = 0;
         }
@@ -175,11 +240,10 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                     setPdfPage(page);
                     if (pageNum !== currentPage) setCurrentPage(pageNum);
                     
-                    // 初期表示時にコンテナに収まるようにスケールを計算
                     if (containerRef.current) {
                         const container = containerRef.current;
                         const viewport = page.getViewport({ scale: 1.0 });
-                        const containerWidth = container.clientWidth - 40; // パディング分
+                        const containerWidth = container.clientWidth - 40;
                         const initialScale = Math.min(containerWidth / viewport.width, 1.5);
                         setDisplayZoom(initialScale);
                         setRenderZoom(initialScale);
@@ -202,10 +266,9 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
         };
     }, [fileUrl]);
 
-    // ページ切り替え処理
+    // ページ切り替え
     useEffect(() => {
         if (!pdfDoc) return;
-        
         const changePage = async () => {
             setIsLoading(true);
             try {
@@ -215,26 +278,21 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                 console.error("Page Change Error:", err);
             }
         };
-        
         changePage();
     }, [currentPage, pdfDoc]);
 
-    // 表示ズームが変更されたら、少し遅れてレンダリング用ズームを更新（デバウンス処理）
+    // デバウンスレンダリング
     useEffect(() => {
         if (renderTimeoutRef.current) clearTimeout(renderTimeoutRef.current);
-        
-        // ズーム操作中（即時性が求められるとき）はCSSで拡大し、
-        // 操作が止まって400ms後に高精細レンダリングを実行する
         renderTimeoutRef.current = setTimeout(() => {
             setRenderZoom(displayZoom);
         }, 400);
-
         return () => {
             if (renderTimeoutRef.current) clearTimeout(renderTimeoutRef.current);
         };
     }, [displayZoom]);
 
-    // renderZoom変更時に高精細再レンダリング
+    // PDF高精細レンダリング
     useEffect(() => {
         if (!pdfPage || !canvasRef.current) return;
 
@@ -243,7 +301,6 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
         
         const render = async () => {
             try {
-                // モバイル・タブレットでのメモリクラッシュ・真っ白になる現象を防ぐための最大解像度
                 const MAX_CANVAS_DIMENSION = 3000;
                 const baseViewport = pdfPage.getViewport({ scale: 1.0 });
                 
@@ -254,16 +311,13 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                     targetScale = Math.min(scaleX, scaleY);
                 }
 
-                // レンダリング用のスケールを適用
                 const viewport = pdfPage.getViewport({ scale: targetScale }); 
                 
                 const canvas = canvasRef.current!;
                 
-                // オフスクリーンキャンバスによるダブルバッファリング（再描画時のちらつき防止）
                 const offscreenCanvas = document.createElement('canvas');
                 const offscreenContext = offscreenCanvas.getContext('2d');
                 if (!offscreenContext) return;
-
                 offscreenCanvas.width = viewport.width;
                 offscreenCanvas.height = viewport.height;
 
@@ -276,7 +330,6 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                 await currentRenderTask.promise;
                 
                 if (isRendered) {
-                    // 描画が完了したら、メインキャンバスに内容を転送（一瞬白くなるのを防ぐため）
                     canvas.width = viewport.width;
                     canvas.height = viewport.height;
                     const context = canvas.getContext('2d');
@@ -284,11 +337,10 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                         context.drawImage(offscreenCanvas, 0, 0);
                     }
 
-                    const baseViewport = pdfPage.getViewport({ scale: 1.0 });
-                    // 表示サイズを確定（等倍サイズを保持）
+                    const baseViewport2 = pdfPage.getViewport({ scale: 1.0 });
                     setPdfDimensions({ 
-                        width: baseViewport.width, 
-                        height: baseViewport.height 
+                        width: baseViewport2.width, 
+                        height: baseViewport2.height 
                     });
                     setIsLoading(false);
                 }
@@ -311,13 +363,138 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
         };
     }, [pdfPage, renderZoom]);
 
-    // Touch handling for pinch zoom
+    // ペン描画用マウスイベント (PC)
+    const getRelativePoint = useCallback((clientX: number, clientY: number): StrokePoint | null => {
+        const svg = svgRef.current;
+        if (!svg) return null;
+        const rect = svg.getBoundingClientRect();
+        return {
+            x: ((clientX - rect.left) / rect.width) * pdfDimensions.width,
+            y: ((clientY - rect.top) / rect.height) * pdfDimensions.height
+        };
+    }, [pdfDimensions]);
+
+    const handleSvgMouseDown = useCallback((e: React.MouseEvent) => {
+        if (mode !== 'pen' && mode !== 'eraser') return;
+        if (mode === 'eraser') return; // eraser handled by stroke click
+        e.preventDefault();
+        const pt = getRelativePoint(e.clientX, e.clientY);
+        if (!pt) return;
+        isDrawingRef.current = true;
+        currentStrokeRef.current = [pt];
+        setCurrentStroke([pt]);
+    }, [mode, getRelativePoint]);
+
+    const handleSvgMouseMove = useCallback((e: React.MouseEvent) => {
+        if (!isDrawingRef.current || mode !== 'pen') return;
+        const pt = getRelativePoint(e.clientX, e.clientY);
+        if (!pt) return;
+        currentStrokeRef.current = [...currentStrokeRef.current, pt];
+        setCurrentStroke([...currentStrokeRef.current]);
+    }, [mode, getRelativePoint]);
+
+    const handleSvgMouseUp = useCallback(() => {
+        if (!isDrawingRef.current || mode !== 'pen') return;
+        isDrawingRef.current = false;
+        if (currentStrokeRef.current.length < 2) {
+            setCurrentStroke(null);
+            currentStrokeRef.current = [];
+            return;
+        }
+        const newStroke: Stroke = {
+            id: `stroke-${Date.now()}`,
+            points: currentStrokeRef.current,
+            color: penColorRef.current,
+            width: penWidthRef.current,
+            page: currentPageRef.current
+        };
+        const next = [...strokes, newStroke];
+        notifyStrokes(next);
+        setCurrentStroke(null);
+        currentStrokeRef.current = [];
+    }, [mode, strokes, notifyStrokes]);
+
+    // ペン描画用タッチイベント (スマホ/タブレット)　― ペンモード時のみ
+    useEffect(() => {
+        const svg = svgRef.current;
+        if (!svg) return;
+
+        const getRelPt = (touch: Touch): StrokePoint | null => {
+            const rect = svg.getBoundingClientRect();
+            const dims = pdfDimensions;
+            if (!dims.width || !dims.height) return null;
+            return {
+                x: ((touch.clientX - rect.left) / rect.width) * dims.width,
+                y: ((touch.clientY - rect.top) / rect.height) * dims.height
+            };
+        };
+
+        const onTouchStart = (e: TouchEvent) => {
+            if (mode !== 'pen') return;
+            if (e.touches.length !== 1) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const pt = getRelPt(e.touches[0]);
+            if (!pt) return;
+            isDrawingRef.current = true;
+            currentStrokeRef.current = [pt];
+            setCurrentStroke([pt]);
+        };
+
+        const onTouchMove = (e: TouchEvent) => {
+            if (!isDrawingRef.current || mode !== 'pen') return;
+            if (e.touches.length !== 1) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const pt = getRelPt(e.touches[0]);
+            if (!pt) return;
+            currentStrokeRef.current = [...currentStrokeRef.current, pt];
+            setCurrentStroke([...currentStrokeRef.current]);
+        };
+
+        const onTouchEnd = (e: TouchEvent) => {
+            if (!isDrawingRef.current || mode !== 'pen') return;
+            e.preventDefault();
+            e.stopPropagation();
+            isDrawingRef.current = false;
+            if (currentStrokeRef.current.length < 2) {
+                setCurrentStroke(null);
+                currentStrokeRef.current = [];
+                return;
+            }
+            const newStroke: Stroke = {
+                id: `stroke-${Date.now()}`,
+                points: currentStrokeRef.current,
+                color: penColorRef.current,
+                width: penWidthRef.current,
+                page: currentPageRef.current
+            };
+            setStrokes(prev => {
+                const next = [...prev, newStroke];
+                onStrokesChange?.(next);
+                return next;
+            });
+            setCurrentStroke(null);
+            currentStrokeRef.current = [];
+        };
+
+        svg.addEventListener('touchstart', onTouchStart, { passive: false });
+        svg.addEventListener('touchmove', onTouchMove, { passive: false });
+        svg.addEventListener('touchend', onTouchEnd, { passive: false });
+        return () => {
+            svg.removeEventListener('touchstart', onTouchStart);
+            svg.removeEventListener('touchmove', onTouchMove);
+            svg.removeEventListener('touchend', onTouchEnd);
+        };
+    }, [mode, pdfDimensions, onStrokesChange]);
+
+    // Touch handling for pinch zoom (ペンモード時は無効)
     useEffect(() => {
         const container = containerRef.current;
         if (!container) return;
 
         const handleTouchStart = (e: TouchEvent) => {
-            // 操作ボタン上でのタッチは無視する
+            if (mode === 'pen') return; // ペンモード中はピンチを無視
             if (e.target instanceof Element && e.target.closest('.pointer-events-auto') && !e.target.closest('.cursor-crosshair')) {
                 return;
             }
@@ -334,12 +511,10 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                     e.touches[0].pageY - e.touches[1].pageY
                 );
                 
-                // ピンチの中心点を計算
                 const containerRect = container.getBoundingClientRect();
                 const centerX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
                 const centerY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
                 
-                // viewerRef 自体の相対的な原点を設定（CSS Transform用）
                 if (viewerRef.current) {
                     const rect = viewerRef.current.getBoundingClientRect();
                     const originX = centerX - rect.left;
@@ -353,7 +528,7 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                     distance: dist,
                     initialZoom: displayZoom,
                     isPinching: true,
-                    pinchOriginX: Math.max(0.1, centerX - containerRect.left), // 0回避
+                    pinchOriginX: Math.max(0.1, centerX - containerRect.left),
                     pinchOriginY: Math.max(0.1, centerY - containerRect.top),
                     lastScaleFactor: 1.0
                 };
@@ -363,8 +538,9 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
 
         let ticking = false;
         const handleTouchMove = (e: TouchEvent) => {
+            if (mode === 'pen') return;
             if (e.touches.length === 2 && touchState.current.isPinching) {
-                e.preventDefault(); // スクロール等デフォルトの動きを阻止
+                e.preventDefault();
                 const dist = Math.hypot(
                     e.touches[0].pageX - e.touches[1].pageX,
                     e.touches[0].pageY - e.touches[1].pageY
@@ -375,10 +551,7 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                         const factor = dist / touchState.current.distance;
                         const newZoom = Math.min(Math.max(touchState.current.initialZoom * factor, 0.2), 5.0);
                         const actualFactor = newZoom / touchState.current.initialZoom;
-                        
                         touchState.current.lastScaleFactor = actualFactor;
-                        
-                        // 高速なCSS Transformだけで見た目だけをズームさせてチカチカを防止（レイアウト計算を走らせない）
                         if (viewerRef.current) {
                             viewerRef.current.style.transform = `scale(${actualFactor})`;
                         }
@@ -390,7 +563,7 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
         };
 
         const handleTouchEnd = (e: TouchEvent) => {
-            // 操作ボタン上でのタッチは無視する
+            if (mode === 'pen') return;
             if (e.target instanceof Element && e.target.closest('.pointer-events-auto') && !e.target.closest('.cursor-crosshair')) {
                 return;
             }
@@ -405,9 +578,7 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                 if (actualFactor !== 1.0) {
                     const finalZoom = Math.min(Math.max(touchState.current.initialZoom * actualFactor, 0.2), 5.0);
                     if (Math.abs(finalZoom - displayZoom) > 0.001) {
-                        // ブラウザが縮小時などにScrollを先走って0にリセットしてしまうのを防ぐため、変更直前のスクロールを記憶しておく
                         preZoomScrollRef.current = { x: container.scrollLeft, y: container.scrollTop };
-                        // TransformはuseLayoutEffect内でリセットされるため・設定後すぐには消さない（チラつき防止）
                         setDisplayZoom(finalZoom);
                     } else {
                         touchState.current.pinchOriginX = 0;
@@ -425,8 +596,7 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                         viewerRef.current.style.willChange = 'auto';
                     }
                 }
-            } else if (e.changedTouches.length === 1 && !readOnly && !touchState.current.isTouchingMarker) {
-                // シングルタップによるピン設置（ピンを触っていない時のみ）
+            } else if (e.changedTouches.length === 1 && !readOnly && !touchState.current.isTouchingMarker && mode === 'pin') {
                 const timeDiff = Date.now() - touchState.current.startTime;
                 const endX = e.changedTouches[0].clientX;
                 const endY = e.changedTouches[0].clientY;
@@ -435,15 +605,11 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                     endY - touchState.current.startY
                 );
 
-                // 300ms以内、かつ移動距離が小さい場合はタップとみなす
                 if (timeDiff < 300 && distFromStart < 15) {
                     const rect = viewerRef.current?.getBoundingClientRect();
                     if (rect) {
                         const x = ((endX - rect.left) / rect.width) * 100;
                         const y = ((endY - rect.top) / rect.height) * 100;
-                        
-                        // ReactのonClickと二重発火しないよう短いラグを空けて呼ぶか、preventDefaultを検討
-                        // ここでは直接呼び出し
                         onAddMarker({
                             x,
                             y,
@@ -467,7 +633,7 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
             container.removeEventListener('touchend', handleTouchEnd);
             container.removeEventListener('touchcancel', handleTouchEnd);
         };
-    }, [displayZoom, pdfPage]);
+    }, [displayZoom, pdfPage, mode]);
 
     const handleContainerZoomChange = (newZoom: number) => {
         if (containerRef.current) {
@@ -478,6 +644,7 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
 
     const handleContainerClick = (e: React.MouseEvent<HTMLDivElement>) => {
         if (readOnly || touchState.current.isPinching) return;
+        if (mode !== 'pin') return; // ピンモード以外はクリックでピンを立てない
         const rect = e.currentTarget.getBoundingClientRect();
         const x = ((e.clientX - rect.left) / rect.width) * 100;
         const y = ((e.clientY - rect.top) / rect.height) * 100;
@@ -491,6 +658,19 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
         });
     };
 
+    // undo
+    const handleUndo = () => {
+        const next = strokes.slice(0, -1);
+        notifyStrokes(next);
+    };
+
+    // clear all strokes on current page
+    const handleClearPage = () => {
+        if (!confirm('このページのペン書き込みをすべて消去しますか？')) return;
+        const next = strokes.filter(s => s.page !== currentPage);
+        notifyStrokes(next);
+    };
+
     if (!fileUrl) {
         return (
             <div className={className || "h-[400px] w-full border-2 border-dashed border-stone-200 rounded-2xl flex flex-col items-center justify-center bg-stone-50 text-stone-400 p-8 text-center"}>
@@ -500,6 +680,9 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
             </div>
         );
     }
+
+    const currentPageStrokes = strokes.filter(s => s.page === currentPage);
+    const strokesOnPage = currentPageStrokes.length;
 
     return (
         <div ref={containerRef} className={className || "h-[700px] w-full border border-stone-200 rounded-2xl overflow-auto shadow-inner bg-stone-100 relative"}>
@@ -572,9 +755,100 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                     </div>
                 </div>
             )}
+
+            {/* ─── ツールバー（左下固定） ─── */}
+            {!isLoading && !error && !readOnly && (
+                <div
+                    className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[1001] pointer-events-auto"
+                    onTouchStart={(e) => e.stopPropagation()}
+                    onTouchEnd={(e) => e.stopPropagation()}
+                >
+                    <div className="flex flex-col gap-2 items-center">
+
+                        {/* ペンモード時のオプション */}
+                        {mode === 'pen' && (
+                            <div className="flex flex-col gap-2 bg-white/95 backdrop-blur border border-stone-200 shadow-2xl rounded-2xl px-3 py-3 w-[calc(100vw-32px)] max-w-sm">
+                                {/* 上段：カラーパレット */}
+                                <div className="flex items-center justify-center gap-2 flex-wrap">
+                                    {PEN_COLORS.map(c => (
+                                        <button
+                                            key={c.value}
+                                            onClick={() => setPenColor(c.value)}
+                                            className={`w-8 h-8 rounded-full border-2 transition-transform ${penColor === c.value ? 'scale-125 border-stone-700 shadow-md' : 'border-white'}`}
+                                            style={{ backgroundColor: c.value }}
+                                            title={c.label}
+                                        />
+                                    ))}
+                                </div>
+                                {/* 下段：太さ + Undo + 全消去 */}
+                                <div className="flex items-center justify-center gap-2">
+                                    {PEN_WIDTHS.map(w => (
+                                        <button
+                                            key={w}
+                                            onClick={() => setPenWidth(w)}
+                                            className={`flex items-center justify-center w-9 h-9 rounded-xl transition-colors ${penWidth === w ? 'bg-stone-800 text-white' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'}`}
+                                            title={`太さ ${w}`}
+                                        >
+                                            <div className="rounded-full bg-current" style={{ width: Math.min(w * 2 + 4, 24), height: Math.min(w * 2 + 4, 24) }} />
+                                        </button>
+                                    ))}
+                                    <div className="w-px h-6 bg-stone-200 mx-1" />
+                                    <button
+                                        onClick={handleUndo}
+                                        disabled={strokesOnPage === 0}
+                                        className="flex items-center justify-center w-9 h-9 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-600 disabled:opacity-30"
+                                        title="1つ戻す"
+                                    >
+                                        <Undo2 className="w-5 h-5" />
+                                    </button>
+                                    <button
+                                        onClick={handleClearPage}
+                                        disabled={strokesOnPage === 0}
+                                        className="flex items-center justify-center w-9 h-9 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-500 disabled:opacity-30"
+                                        title="このページの書き込みを全消去"
+                                    >
+                                        <Trash2 className="w-5 h-5" />
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* メインツール切り替え */}
+                        <div className="flex gap-2 bg-white/95 backdrop-blur border border-stone-200 shadow-2xl rounded-2xl px-3 py-2.5">
+                            <button
+                                onClick={() => setMode('pin')}
+                                className={`flex items-center gap-2 px-3 py-2.5 sm:px-4 rounded-xl font-bold text-sm transition-all ${mode === 'pin' ? 'bg-emerald-600 text-white shadow-md' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'}`}
+                                title="ピンモード（タップで指摘を追加）"
+                            >
+                                <Pin className="w-5 h-5" />
+                                <span className="hidden sm:inline">ピン</span>
+                            </button>
+                            <button
+                                onClick={() => setMode('pen')}
+                                className={`flex items-center gap-2 px-3 py-2.5 sm:px-4 rounded-xl font-bold text-sm transition-all ${mode === 'pen' ? 'bg-blue-600 text-white shadow-md' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'}`}
+                                title="ペンモード（図面に書き込み）"
+                            >
+                                <Pen className="w-5 h-5" />
+                                <span className="hidden sm:inline">ペン</span>
+                            </button>
+                            {(mode === 'pen' || mode === 'eraser') && strokesOnPage > 0 && (
+                                <button
+                                    onClick={() => setMode(m => m === 'eraser' ? 'pen' : 'eraser')}
+                                    className={`flex items-center gap-2 px-3 py-2.5 sm:px-4 rounded-xl font-bold text-sm transition-all ${mode === 'eraser' ? 'bg-orange-500 text-white shadow-md' : 'bg-stone-100 text-stone-600 hover:bg-stone-200'}`}
+                                    title="消しゴムモード（線をタップして削除）"
+                                >
+                                    <Eraser className="w-5 h-5" />
+                                    <span className="hidden sm:inline">消しゴム</span>
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {isLoading && (
                 <div className="sticky top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[200] bg-white/90 backdrop-blur-sm p-8 rounded-2xl shadow-xl flex flex-col items-center justify-center gap-4 w-64 max-w-full">
-                    <Loader2 className="w-10 h-10 text-emerald-600" />
+                    <Loader2 className="w-10 h-10 text-emerald-600 animate-spin" />
                     <div className="text-center">
                         <p className="text-sm font-bold text-stone-700">図面を描画中...</p>
                         <p className="text-[10px] text-stone-500 mt-1">ファイルサイズにより時間がかかる場合があります</p>
@@ -607,7 +881,7 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
             <div className="relative min-h-full min-w-full">
                 <div 
                     ref={viewerRef}
-                    className={`relative bg-white shadow-xl ${isLoading ? 'opacity-0' : 'opacity-100'} ${!readOnly && 'cursor-crosshair'}`}
+                    className={`relative bg-white shadow-xl ${isLoading ? 'opacity-0' : 'opacity-100'} ${mode === 'pin' && !readOnly ? 'cursor-crosshair' : mode === 'pen' ? 'cursor-none' : mode === 'eraser' ? 'cursor-cell' : ''}`}
                     style={{ 
                         width: `${pdfDimensions.width * displayZoom}px`,
                         height: `${pdfDimensions.height * displayZoom}px`,
@@ -616,13 +890,66 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
                     }}
                     onClick={handleContainerClick}
                 >
+                    {/* PDF Canvas */}
                     <canvas 
                         ref={canvasRef} 
                         className="absolute inset-0 w-full h-full rounded-sm border border-black/5 pointer-events-none" 
                     />
 
+                    {/* SVG 書き込みレイヤー */}
+                    {pdfDimensions.width > 0 && (
+                        <svg
+                            ref={svgRef}
+                            className="absolute inset-0 w-full h-full"
+                            viewBox={`0 0 ${pdfDimensions.width} ${pdfDimensions.height}`}
+                            style={{ 
+                                pointerEvents: (mode === 'pen' || mode === 'eraser') ? 'all' : 'none',
+                                touchAction: mode === 'pen' ? 'none' : 'auto',
+                                cursor: mode === 'pen' ? 'crosshair' : mode === 'eraser' ? 'cell' : 'default'
+                            }}
+                            onMouseDown={handleSvgMouseDown}
+                            onMouseMove={handleSvgMouseMove}
+                            onMouseUp={handleSvgMouseUp}
+                            onMouseLeave={handleSvgMouseUp}
+                        >
+                            {/* 保存済みストローク */}
+                            {currentPageStrokes.map(stroke => (
+                                <path
+                                    key={stroke.id}
+                                    d={buildPath(stroke.points)}
+                                    stroke={stroke.color}
+                                    strokeWidth={stroke.width}
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    fill="none"
+                                    opacity={0.85}
+                                    className={mode === 'eraser' ? 'cursor-cell hover:opacity-40' : ''}
+                                    onClick={mode === 'eraser' ? (e) => {
+                                        e.stopPropagation();
+                                        const next = strokes.filter(s => s.id !== stroke.id);
+                                        notifyStrokes(next);
+                                    } : undefined}
+                                    style={{ pointerEvents: mode === 'eraser' ? 'stroke' : 'none' }}
+                                />
+                            ))}
+                            {/* 現在描画中のストローク */}
+                            {currentStroke && currentStroke.length > 0 && (
+                                <path
+                                    d={buildPath(currentStroke)}
+                                    stroke={penColor}
+                                    strokeWidth={penWidth}
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    fill="none"
+                                    opacity={0.85}
+                                    style={{ pointerEvents: 'none' }}
+                                />
+                            )}
+                        </svg>
+                    )}
+
                     {/* Markers Overlay */}
-                    {markers
+                    {mode !== 'pen' && markers
                         .filter(m => (m.page || 1) === currentPage)
                         .map((marker) => (
                         <div
@@ -663,4 +990,3 @@ export const DrawingViewer: React.FC<DrawingViewerProps> = ({
         </div>
     );
 };
-

@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
+// @ts-ignore
+import html2pdf from 'html2pdf.js';
 import {
   Plus,
   ClipboardCheck,
@@ -21,7 +23,9 @@ import {
   FileUp,
   Pin,
   Filter,
-  RotateCw
+  RotateCw,
+  Smartphone,
+  Download
 } from "lucide-react";
 import * as pdfjs from 'pdfjs-dist';
 import { collection, onSnapshot, query, orderBy } from "firebase/firestore";
@@ -30,7 +34,7 @@ import { api } from "./services/api";
 import { Site, Inspection, InspectionItem, DrawingMarker } from "./types";
 import { INSPECTION_ITEMS } from "./constants";
 import { VoiceInput, VoiceTextarea } from "./components/VoiceInput";
-import { DrawingViewer } from "./components/DrawingViewer";
+import { DrawingViewer, Stroke } from "./components/DrawingViewer";
 import { compressPdf } from "./utils/pdfCompressor";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
@@ -98,9 +102,86 @@ export default function App() {
   const [markerDescription, setMarkerDescription] = useState("");
   const [markerPhoto, setMarkerPhoto] = useState<string | null>(null);
   const [selectedMarkerDetail, setSelectedMarkerDetail] = useState<DrawingMarker | null>(null);
+  const [newInspLabel, setNewInspLabel] = useState<string>("");
+  const [newInspDate, setNewInspDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [isDragging, setIsDragging] = useState(false);
+  const [showAppQrModal, setShowAppQrModal] = useState(false);
+  const [showManual, setShowManual] = useState(false);
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+  const [isPrinting, setIsPrinting] = useState(false);
+  const [drawingPages, setDrawingPages] = useState<Record<number, string>>({});
+  const [siteDrawingUrl, setSiteDrawingUrl] = useState<string | null>(null);
+  
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const onFileSelectedRef = useRef<((file: File) => void) | null>(null);
+
+  useEffect(() => {
+    if (currentInspection) {
+      window.scrollTo(0, 0);
+      const timer = setTimeout(() => {
+        if (scrollRef.current) scrollRef.current.scrollTop = 0;
+      }, 20);
+      return () => clearTimeout(timer);
+    }
+  }, [currentInspection?.id]);
+
+  // 全画像読み込み完了を待機するユーティリティ
+  const waitForImages = async (elementId: string) => {
+    const el = document.getElementById(elementId);
+    if (!el) return;
+
+    // SafeImageなどの読み込み中状態(.animate-pulse)が消えるのを待つ
+    let waitRetry = 0;
+    while (el.querySelector('.animate-pulse') && waitRetry < 40) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+      waitRetry++;
+    }
+
+    const images = el.querySelectorAll('img');
+    const imagePromises = Array.from(images).map(img => {
+      if (img.complete) return Promise.resolve();
+      return new Promise(resolve => {
+        img.onload = resolve;
+        img.onerror = resolve;
+      });
+    });
+    await Promise.all(imagePromises);
+    // レンダリング安定のための最終待機 (モバイルは長めに)
+    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+    await new Promise(resolve => setTimeout(resolve, isMobile ? 1500 : 800));
+  };
+
+  // 実際のPDF出力/印刷実行
+  useEffect(() => {
+    const runPrint = async () => {
+      if (!isPrinting) return;
+      
+      const element = document.getElementById('report-content');
+      if (!element) {
+        setIsPrinting(false);
+        return;
+      }
+
+      // 画像の読み込み完了を待機
+      await waitForImages('report-content');
+
+      // PDFの保存名を「現場名_日付」にするため、一時的にドキュメントタイトルを変更
+      const originalTitle = document.title;
+      const fileName = `${currentSite?.name || '点検報告書'}_${currentInspection?.date || ''}`;
+      document.title = fileName;
+
+      // 全デバイス共通でブラウザ標準の印刷画面を呼び出す
+      window.print();
+
+      // タイトルを元に戻す
+      document.title = originalTitle;
+
+      setIsPrinting(false);
+      setDrawingPages({});
+    };
+    runPrint();
+  }, [isPrinting, currentSite?.name, currentInspection?.date]);
 
   const processImage = (file: File, callback: (dataUrl: string) => void) => {
     const img = new Image();
@@ -115,7 +196,8 @@ export default function App() {
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(img, 0, 0, w, h);
-        callback(canvas.toDataURL('image/jpeg', 0.6));
+        // 保存時のJPEG品質を下げてファイルサイズを抑制 (0.4)
+        callback(canvas.toDataURL('image/jpeg', 0.4));
       }
       URL.revokeObjectURL(img.src);
     };
@@ -141,9 +223,8 @@ export default function App() {
   const [tempMarkerDescription, setTempMarkerDescription] = useState("");
   const [tempMarkerPhoto, setTempMarkerPhoto] = useState<string | null>(null);
   const [inspectionCompleted, setInspectionCompleted] = useState(false);
-  const [isPrinting, setIsPrinting] = useState(false);
-  const [drawingPages, setDrawingPages] = useState<Record<number, string>>({});
-  const [siteDrawingUrl, setSiteDrawingUrl] = useState<string | null>(null);
+  // States moved to top
+
 
   useEffect(() => {
     const fetchDrawing = async () => {
@@ -234,60 +315,94 @@ export default function App() {
     setIsPrinting(true);
     setInspectionCompleted(false);
 
-    // ピンがあるページを特定
-    const markerPages = new Set<number>();
+    // 出力対象のページを特定 (ピンがある、またはペン書き込みがあるページ)
+    const targetPages = new Set<number>();
+    const strokes: Stroke[] = currentInspection.drawingStrokes ? JSON.parse(currentInspection.drawingStrokes) : [];
+    
     (currentInspection.items || []).forEach(item => {
       try {
         const markers: DrawingMarker[] = item.markers ? JSON.parse(item.markers) : [];
-        markers.forEach(m => markerPages.add(m.page || 1));
+        markers.forEach(m => targetPages.add(m.page || 1));
       } catch (e) {}
     });
+    // ペン書き込みがあるページも追加
+    strokes.forEach(s => targetPages.add(s.page || 1));
 
-    if (markerPages.size > 0) {
-      // PDFから各ページを画像として抽出
+    if (targetPages.size > 0) {
       const pdfUrl = await api.getFileUrl(currentSite.drawingPdfId);
       const pages: Record<number, string> = {};
-      
       try {
-        const pdfData = pdfUrl.startsWith('data:') 
+        const loadingTask = pdfjs.getDocument(pdfUrl.startsWith('data:') 
           ? { data: new Uint8Array(atob(pdfUrl.split(',')[1]).split('').map(c => c.charCodeAt(0))) }
-          : { url: pdfUrl };
-        
-        const CMAP_URL = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/cmaps/`;
-        const CMAP_PACKED = true;
-
-        const loadingTask = pdfjs.getDocument({
-          ...pdfData,
-          cMapUrl: CMAP_URL,
-          cMapPacked: CMAP_PACKED
-        });
+          : { url: pdfUrl, cMapUrl: `https://unpkg.com/pdfjs-dist@${pdfjs.version}/cmaps/`, cMapPacked: true }
+        );
         const pdf = await loadingTask.promise;
+        const isMobileDevice = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
         
-        for (const pageNum of Array.from(markerPages)) {
+        for (const pageNum of Array.from(targetPages)) {
           const page = await pdf.getPage(pageNum);
-          const viewport = page.getViewport({ scale: 2.0 }); // 印刷用に高解像度
+          const scale = isMobileDevice ? 1.0 : 2.0;
+          const viewport = page.getViewport({ scale }); 
           const canvas = document.createElement('canvas');
-          canvas.width = viewport.width;
-          canvas.height = viewport.height;
+          canvas.width = viewport.width; canvas.height = viewport.height;
           const ctx = canvas.getContext('2d');
+          
           if (ctx) {
+            // 1. PDF本体を描画
             await page.render({ canvasContext: ctx, viewport }).promise;
-            pages[pageNum] = canvas.toDataURL('image/jpeg', 0.8);
+
+            // 2. ペン書き込み（ストローク）を重ねて描画
+            const pageStrokes = strokes.filter(s => s.page === pageNum);
+            if (pageStrokes.length > 0) {
+              ctx.save();
+              ctx.scale(scale, scale);
+              pageStrokes.forEach(stroke => {
+                if (stroke.points.length < 1) return;
+                ctx.beginPath();
+                ctx.strokeStyle = stroke.color;
+                ctx.lineWidth = stroke.width;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.globalAlpha = 0.85;
+
+                const pts = stroke.points;
+                ctx.moveTo(pts[0].x, pts[0].y);
+                for (let i = 1; i < pts.length - 1; i++) {
+                  const cx = (pts[i].x + pts[i + 1].x) / 2;
+                  const cy = (pts[i].y + pts[i + 1].y) / 2;
+                  ctx.quadraticCurveTo(pts[i].x, pts[i].y, cx, cy);
+                }
+                if (pts.length > 1) {
+                  ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+                }
+                ctx.stroke();
+              });
+              ctx.restore();
+            }
+
+            // 3. 画像として保存
+            const quality = isMobileDevice ? 0.3 : 0.8;
+            const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
+            if (blob) {
+              pages[pageNum] = URL.createObjectURL(blob);
+            }
           }
         }
         setDrawingPages(pages);
-      } catch (e) {
-        console.error("Failed to capture drawing pages for print:", e);
-      }
+      } catch (e) { console.error("Drawing capture failed:", e); }
     }
-
-    // レンダリングを待ってから印刷
-    setTimeout(() => {
-      window.print();
-      setIsPrinting(false);
-      setDrawingPages({}); // Clear drawing pages after printing
-    }, 1000);
+    
+    setIsPrinting(true);
   };
+
+  // 生成されたBlob URLのクリーンアップ
+  useEffect(() => {
+    if (!isPrinting && Object.keys(drawingPages).length > 0) {
+      Object.values(drawingPages).forEach(url => {
+        if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+      });
+    }
+  }, [isPrinting, drawingPages]);
   useEffect(() => {
     loadInitialData();
   }, []);
@@ -334,11 +449,26 @@ export default function App() {
       }
     });
 
+    // Current Inspection Items Listener
+    let unsubItems: (() => void) | undefined;
+    if (currentInspection?.id) {
+      const qItems = collection(db, "inspections", currentInspection.id, "items");
+      unsubItems = onSnapshot(qItems, (snapshot) => {
+        const itemsData = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as InspectionItem));
+        setCurrentInspection(prev => {
+          if (!prev || prev.id !== currentInspection.id) return prev;
+          return { ...prev, items: itemsData };
+        });
+      });
+    }
+
     return () => {
       unsubSites();
       unsubInspections();
+      if (unsubItems) unsubItems();
     };
-  }, [currentSite?.id, currentInspection?.id]); // Only re-setup if active IDs change
+  }, [currentSite?.id, currentInspection?.id]);
+ // Only re-setup if active IDs change
 
   const loadInitialData = async () => {
     const [sitesData, rawInspections] = await Promise.all([
@@ -437,6 +567,7 @@ export default function App() {
 
   const handleManualHeaderUpdate = async (data: Partial<Inspection>) => {
     if (!currentInspection) return;
+    setCurrentInspection({ ...currentInspection, ...data });
     try {
       await api.updateInspection(currentInspection.id, data);
     } catch (err) {
@@ -569,6 +700,7 @@ export default function App() {
       setIsSidebarOpen(false);
       setPinningForItem(null);
       setIsDrawingFullView(false);
+      setViewingSiteHistory(null);
     } catch (err: any) {
       console.error("Select inspection error:", err);
       alert("点検履歴の読み込みに失敗しました。");
@@ -594,8 +726,8 @@ export default function App() {
 
     // 2. Inspection list items check
     const hasUnresolvedItem = (currentInspection.items || []).some(item => {
-      const isIssue = item.rating === '✕' || item.rating === '×';
-      return isIssue && !item.correctiveAction;
+      const isFinding = item.rating === '✕' || item.rating === '×' || (item.comment && item.comment.trim() !== "") || item.photoId;
+      return isFinding && !item.correctiveAction;
     });
     if (hasUnresolvedItem) issues.push("点検項目の是正処置内容");
 
@@ -652,7 +784,7 @@ export default function App() {
                       )}
                     >
                       <div className="text-xs text-stone-500 mb-1 flex justify-between">
-                        <span>{insp.date}</span>
+                        <span>{insp.label || insp.date}</span>
                         <div className="flex gap-1">
                           {insp.status === 'completed' ? (
                             <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-700">処置完了</span>
@@ -707,13 +839,31 @@ export default function App() {
             </div>
           </div>
 
-          <button
-            onClick={() => window.location.reload()}
-            className="p-2.5 hover:bg-stone-100 rounded-xl text-stone-400 flex items-center justify-center transition-colors active:scale-95"
-            title="最新の情報に更新（再読み込み）"
-          >
-            <RotateCw className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setShowManual(true)}
+              className="flex items-center gap-2 px-3 py-2 bg-stone-100 text-stone-600 hover:bg-stone-200 rounded-xl text-xs sm:text-sm font-bold transition-colors"
+              title="操作マニュアル"
+            >
+              <FileText className="w-4 h-4" />
+              <span className="hidden sm:inline">マニュアル</span>
+            </button>
+            <button
+              onClick={() => setShowAppQrModal(true)}
+              className="flex items-center gap-2 px-3 py-2 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 rounded-xl text-xs sm:text-sm font-bold transition-colors"
+              title="スマホアプリ連携"
+            >
+              <Smartphone className="w-4 h-4" />
+              <span className="hidden sm:inline">スマホ連携</span>
+            </button>
+            <button
+              onClick={() => window.location.reload()}
+              className="p-2.5 hover:bg-stone-100 rounded-xl text-stone-400 flex items-center justify-center transition-colors active:scale-95"
+              title="最新の情報に更新（再読み込み）"
+            >
+              <RotateCw className="w-5 h-5" />
+            </button>
+          </div>
 
         </header>
 
@@ -937,20 +1087,35 @@ export default function App() {
                         <div className="grid gap-2 max-h-[40vh] overflow-y-auto pr-1 custom-scrollbar">
                           {inspections.filter(i => i.siteId === viewingSiteHistory.id).length > 0 ? (
                             inspections.filter(i => i.siteId === viewingSiteHistory.id).map(insp => (
-                              <button
+                              <div
                                 key={insp.id}
-                                onClick={() => {
-                                  selectInspection(insp.id);
-                                  setViewingSiteHistory(null);
+                                className="w-full text-left p-4 rounded-2xl bg-stone-50 hover:bg-emerald-50 border border-stone-100 hover:border-emerald-200 group flex items-center justify-between cursor-pointer"
+                                onClick={async () => {
+                                  await selectInspection(insp.id);
                                 }}
-                                className="w-full text-left p-4 rounded-2xl bg-stone-50 hover:bg-emerald-50 border border-stone-100 hover:border-emerald-200 group flex items-center justify-between"
                               >
                                 <div className="flex items-center gap-4">
                                   <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center text-stone-400 group-hover:text-emerald-500 shadow-sm">
                                     <Calendar className="w-4 h-4" />
                                   </div>
                                   <div>
-                                    <div className="font-bold text-stone-800">{insp.date}</div>
+                                    <div className="flex items-center gap-1">
+                                      <div onClick={(e) => e.stopPropagation()} className="w-40">
+                                        <VoiceInput 
+                                          value={insp.label || insp.date || ''}
+                                          onChange={async (e) => {
+                                            const newLabel = (e.target as HTMLInputElement).value;
+                                            try {
+                                              await api.updateInspection(insp.id, { label: newLabel });
+                                            } catch (err) {
+                                              console.error("Label update error:", err);
+                                            }
+                                          }}
+                                          className="bg-transparent border-none p-0 focus:ring-0 outline-none w-full font-bold text-stone-800 hover:text-emerald-600 transition-colors"
+                                          placeholder="タイトル入力..."
+                                        />
+                                      </div>
+                                    </div>
                                     <div className="flex items-center gap-1.5 text-[10px] font-bold">
                                       {insp.status === 'completed' ? (
                                         <>
@@ -980,7 +1145,7 @@ export default function App() {
                                   </button>
                                   <ChevronRight className="w-4 h-4 text-stone-300 group-hover:text-emerald-400" />
                                 </div>
-                              </button>
+                              </div>
                             ))
                           ) : (
                             <div className="text-center py-8 text-stone-400 bg-stone-50 rounded-2xl border border-dashed border-stone-200">
@@ -989,36 +1154,62 @@ export default function App() {
                           )}
                         </div>
                       </div>
-
-                      <button
-                        onClick={async () => {
-                          const newInsp = await api.createInspection({ 
-                            siteId: viewingSiteHistory.id, 
-                            date: new Date().toISOString().split('T')[0], 
-                            status: 'draft' 
-                          });
-                          await loadInitialData();
-                          selectInspection(newInsp.id);
-                          setViewingSiteHistory(null);
-                        }}
-                        className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-emerald-700 shadow-lg mt-2"
-                      >
-                        <Plus className="w-5 h-5" />
-                        新規点検を開始する
-                      </button>
+                      <div className="pt-4 mt-2 border-t border-stone-100 space-y-3">
+                        <div className="flex flex-col sm:flex-row gap-3">
+                          <div className="flex-1">
+                            <label className="text-[10px] font-bold text-stone-400 uppercase mb-1 block">履歴ラベル（自由入力）</label>
+                            <VoiceInput 
+                              value={newInspLabel}
+                              onChange={(e) => setNewInspLabel(e.target.value)}
+                              placeholder="例：第1回パトロール"
+                              className="w-full bg-stone-50 border border-stone-200 rounded-xl px-4 py-3 text-sm font-bold text-stone-700 focus:ring-2 focus:ring-emerald-500 outline-none"
+                            />
+                          </div>
+                          <div className="sm:w-48">
+                            <label className="text-[10px] font-bold text-stone-400 uppercase mb-1 block">点検日</label>
+                            <div className="relative">
+                              <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400 pointer-events-none" />
+                              <input 
+                                type="date"
+                                value={newInspDate}
+                                onChange={(e) => setNewInspDate(e.target.value)}
+                                className="w-full bg-stone-50 border border-stone-200 rounded-xl pl-9 pr-3 py-3 text-sm font-bold text-stone-700 focus:ring-2 focus:ring-emerald-500 outline-none"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          onClick={async () => {
+                            if (!viewingSiteHistory) return;
+                            const newInsp = await api.createInspection({ 
+                              siteId: viewingSiteHistory.id, 
+                              date: newInspDate,
+                              label: newInspLabel.trim() || newInspDate,
+                              status: 'draft' 
+                            });
+                            setNewInspLabel("");
+                            setNewInspDate(new Date().toISOString().split('T')[0]);
+                            await selectInspection(newInsp.id);
+                          }}
+                          className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-emerald-700 shadow-lg active:scale-95 transition-all"
+                        >
+                          <Plus className="w-5 h-5" />
+                          新しい点検記録を作成
+                        </button>
+                      </div>
                     </section>
                   </div>
                 )}
                 </div>
               </div>
             ) : (
-            <div className="flex-1 overflow-y-auto p-4 space-y-6 bg-stone-50">
+            <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-6 bg-stone-50">
               <div className="space-y-6 max-w-3xl mx-auto">
                 <h1 className="hidden print:block text-2xl font-bold text-center mb-6">現場パトロール点検報告書</h1>
                 {/* Header Info Card */}
                 <section className="bg-white rounded-2xl p-5 border border-stone-200 shadow-sm space-y-4">
                   <div className="flex flex-col md:flex-row gap-4">
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 flex-1">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 flex-1">
                       <div className="space-y-1">
                         <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider">現場名</label>
                         <VoiceInput value={currentSite?.name || ''} onChange={(e) => currentSite && handleUpdateSiteSimple(currentSite.id, { name: e.target.value })} className="w-full bg-stone-50 border-none rounded-lg px-2 py-1 text-sm font-medium" placeholder="現場名" />
@@ -1057,12 +1248,15 @@ export default function App() {
 
                 {/* Drawing & Pinning */}
                 {currentSite?.drawingPdfId && (
-                  <section className="bg-emerald-50 rounded-2xl p-5 border border-emerald-100 shadow-sm space-y-4">
+                  <section className="bg-emerald-50 rounded-2xl pt-2.5 pb-4 px-4 border border-emerald-100 shadow-sm space-y-3">
                     <div className="flex justify-between items-center">
-                      <label className="text-[10px] font-bold text-emerald-600 uppercase flex items-center gap-1"><Pin className="w-3 h-3" />図面・配置指摘</label>
+                      <h3 className="font-bold text-emerald-700 flex items-center gap-2">
+                        <Pin className="w-4 h-4 text-emerald-600" />
+                        図面・配置指摘
+                      </h3>
                       <button 
                         onClick={() => { setIsDrawingFullView(!isDrawingFullView); setPinningForItem(null); }} 
-                        className="flex items-center gap-2 px-5 py-2.5 bg-emerald-600 text-white rounded-xl text-xs font-bold shadow-md hover:bg-emerald-700" 
+                        className="flex items-center gap-2 px-6 py-3 bg-emerald-600 text-white rounded-xl text-base font-bold shadow-md hover:bg-emerald-700 active:scale-95 transition-all" 
                         title="図面表示切り替え"
                       >
                         <Pin className="w-3.5 h-3.5" />
@@ -1070,7 +1264,7 @@ export default function App() {
                       </button>
                     </div>
                       {isDrawingFullView && (
-                        <div className="fixed inset-0 z-[9999] bg-stone-100 flex flex-col">
+                        <div className="fixed inset-0 z-[9999] bg-stone-100 flex flex-col animate-slide-up">
                           {/* 戻るボタン＆ヘッダー */}
                           <div className="bg-white px-4 py-3 shadow-md border-b flex items-center justify-between z-[10000]">
                             <button 
@@ -1153,6 +1347,20 @@ export default function App() {
                               }}
                               onRemoveMarker={handleDeleteMarker}
                               readOnly={currentInspection.status === 'completed'}
+                              strokes={(() => {
+                                try {
+                                  return currentInspection.drawingStrokes ? JSON.parse(currentInspection.drawingStrokes) : [];
+                                } catch { return []; }
+                              })()}
+                              onStrokesChange={async (newStrokes: Stroke[]) => {
+                                const json = JSON.stringify(newStrokes);
+                                setCurrentInspection(prev => prev ? { ...prev, drawingStrokes: json } : prev);
+                                try {
+                                  await api.updateInspection(currentInspection.id, { drawingStrokes: json });
+                                } catch (err) {
+                                  console.error('Stroke save error:', err);
+                                }
+                              }}
                             />
 
                             {activeMarkerInput && (
@@ -1393,11 +1601,24 @@ export default function App() {
                                         </div>
                                       ) : (
                                         <>
-                                          <div>
-                                            <div className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest mb-1">指摘事項</div>
-                                            <h3 className="text-lg font-bold text-stone-800 leading-tight">
-                                              {selectedMarkerDetail.description || selectedMarkerDetail.label}
-                                            </h3>
+                                          <div className="flex items-start justify-between gap-4">
+                                            <div className="flex-1">
+                                              <div className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest mb-1">指摘事項</div>
+                                              <h3 className="text-lg font-bold text-stone-800 leading-tight">
+                                                {selectedMarkerDetail.description || selectedMarkerDetail.label}
+                                              </h3>
+                                            </div>
+                                            <button
+                                              onClick={() => {
+                                                setTempMarkerDescription(selectedMarkerDetail.description || "");
+                                                setTempMarkerPhoto(selectedMarkerDetail.issuePhotoId || null);
+                                                setIsActiveEditingMarker(true);
+                                              }}
+                                              className="p-2.5 bg-stone-100 text-stone-500 rounded-xl hover:bg-stone-200 hover:text-stone-700 transition-all shrink-0 mt-1"
+                                              title="指摘内容を編集"
+                                            >
+                                              <Edit2 className="w-4 h-4" />
+                                            </button>
                                           </div>
 
                                           {selectedMarkerDetail.correctiveAction && (
@@ -1437,25 +1658,14 @@ export default function App() {
                                             </div>
                                           )}
 
-                                          <div className="flex gap-2 pt-2">
-                                            <button
-                                              onClick={() => {
-                                                setTempMarkerDescription(selectedMarkerDetail.description || "");
-                                                setTempMarkerPhoto(selectedMarkerDetail.issuePhotoId || null);
-                                                setIsActiveEditingMarker(true);
-                                              }}
-                                              className="flex-1 py-3 bg-stone-100 text-stone-700 rounded-xl font-bold text-sm hover:bg-stone-200 flex items-center justify-center gap-2"
-                                            >
-                                              <Edit2 className="w-4 h-4" />
-                                              指摘を編集
-                                            </button>
+                                          <div className="flex gap-3 pt-2">
                                             <button
                                               onClick={() => {
                                                 setCorrectiveText(selectedMarkerDetail.correctiveAction || "");
                                                 setCorrectivePhoto(selectedMarkerDetail.correctivePhotoId || null);
                                                 setIsActiveCorrecting(true);
                                               }}
-                                              className="flex-1 py-3 bg-emerald-600 text-white rounded-xl font-bold text-sm hover:bg-emerald-700 shadow-md flex items-center justify-center gap-2"
+                                              className="flex-1 py-3.5 bg-emerald-600 text-white rounded-2xl font-bold text-sm hover:bg-emerald-700 shadow-md flex items-center justify-center gap-2 active:scale-95 transition-all"
                                             >
                                               <CheckCircle2 className="w-4 h-4" />
                                               処置入力
@@ -1617,15 +1827,22 @@ export default function App() {
                   </div>
                   <div className="space-y-3">
                     {INSPECTION_ITEMS.filter(itemMaster => {
-                      if (isPrinting) return true; // 印刷時は無条件で全て表示
+                      if (isPrinting) return true;
                       if (!inspectionCompleted) return true;
                       const result = currentInspection.items?.find(i => i.itemId === itemMaster.id);
-                      return result?.rating === '✕' || result?.rating === '×';
+                      const hasFindings = result?.rating === '✕' || result?.rating === '×' || (result?.comment && result.comment.trim() !== "") || result?.photoId;
+                      return hasFindings;
                     }).map(itemMaster => {
                       const result = currentInspection.items?.find(i => i.itemId === itemMaster.id);
-                      const isActionNeeded = result?.rating === '✕' || result?.rating === '×';
+                      const isExpanded = result?.rating === '✕' || result?.rating === '×';
+                      const hasFindings = isExpanded || (result?.comment && result.comment.trim() !== "") || result?.photoId;
+                      const isResolved = (result?.correctiveAction && result.correctiveAction.trim() !== "");
+                      
                       return (
-                        <div key={itemMaster.id} id={`item-${itemMaster.id}`} className={cn("bg-white rounded-2xl p-4 border", isActionNeeded ? "border-rose-200 bg-rose-50" : "border-stone-200")}>
+                        <div key={itemMaster.id} id={`item-${itemMaster.id}`} className={cn(
+                          "bg-white rounded-2xl p-4 border transition-colors", 
+                          isResolved ? "border-emerald-200 bg-emerald-50/50" : hasFindings ? "border-rose-200 bg-rose-50" : "border-stone-200"
+                        )}>
                           <div className="flex justify-between items-start gap-4">
                             <div className="flex-1">
                               <div className="text-[10px] font-bold text-emerald-600 uppercase mb-1">{itemMaster.section}</div>
@@ -1633,16 +1850,24 @@ export default function App() {
                             </div>
                             <div className="flex gap-1">
                               <button
-                                onClick={() => handleManualItemUpdate(itemMaster.id, { rating: isActionNeeded ? '' : '✕' })}
-                                className={cn("px-3 py-1.5 rounded-lg text-xs font-bold border flex items-center gap-1.5", isActionNeeded ? "bg-rose-500 border-rose-500 text-white" : "bg-stone-50 border-stone-200 text-stone-500")}
-                                title="処置が必要としてマーク"
+                                onClick={() => handleManualItemUpdate(itemMaster.id, { rating: isExpanded ? '' : '✕' })}
+                                className={cn(
+                                  "px-3 py-1.5 rounded-lg text-xs font-bold border flex items-center gap-1.5 transition-all text-left", 
+                                  isResolved 
+                                    ? "bg-emerald-600 border-emerald-600 text-white" 
+                                    : hasFindings 
+                                      ? "bg-rose-500 border-rose-500 text-white" 
+                                      : "bg-stone-50 border-stone-200 text-stone-500"
+                                )}
+                                title={isResolved ? "対応済み（クリックで開閉）" : "処置が必要としてマーク"}
                               >
-                                <AlertTriangle className="w-3.5 h-3.5" />処置が必要
+                                {isResolved ? <CheckCircle2 className="w-3.5 h-3.5" /> : <AlertTriangle className="w-3.5 h-3.5" />}
+                                <span className="whitespace-nowrap">{isResolved ? "処置済み" : "処置が必要"}</span>
                               </button>
                             </div>
                           </div>
 
-                          {isActionNeeded && (
+                          {isExpanded && (
                             <div className="mt-4 space-y-4 pt-3 border-t border-rose-100">
                               <div className="space-y-1.5 bg-rose-50 p-3 rounded-xl border border-rose-100/50">
                                 <label className="text-[10px] font-bold text-rose-500 uppercase">指摘内容（状況）</label>
@@ -1717,7 +1942,10 @@ export default function App() {
     </div>
 
       {/* 印刷専用テンプレート (画面上には表示されず、印刷時にのみ表示) */}
-      <div className="print-only report-page">
+      <div 
+        id="report-content"
+        className={cn("print-only report-page", isPrinting && "force-show")}
+      >
         <h1 className="report-page-title">現場パトロール点検報告書</h1>
         
         <div className="report-header-grid">
@@ -1731,15 +1959,15 @@ export default function App() {
           </div>
           <div className="report-header-item">
             <span className="report-header-label">点検日</span>
-            <div className="report-header-value">{currentInspection?.date}</div>
+            <div className="report-header-value">
+              {currentInspection?.date}
+            </div>
           </div>
           <div className="report-header-item">
             <span className="report-header-label">点検者</span>
             <div className="report-header-value">{currentInspection?.inspectorName}</div>
           </div>
         </div>
-
-        <div className="report-section-header">点検項目</div>
 
         {(() => {
           // セクションごとにグループ化
@@ -1749,38 +1977,55 @@ export default function App() {
             return acc;
           }, {} as Record<string, typeof INSPECTION_ITEMS>);
 
-          return Object.entries(sections).map(([sectionName, items]) => {
-            // 指摘内容がある項目のみを抽出
-            const filteredItems = items.filter(itemMaster => {
+          // 表示するセクションが1つでもあるか確認
+          const hasAnyItem = Object.values(sections).some(items =>
+            items.some(itemMaster => {
               const result = currentInspection?.items?.find(i => i.itemId === itemMaster.id);
-              return result?.comment && result.comment.trim() !== "";
-            });
+              const hasComment = result?.comment && result.comment.trim() !== "";
+              const hasCorrectiveAction = result?.correctiveAction && result.correctiveAction.trim() !== "";
+              return hasComment || hasCorrectiveAction;
+            })
+          );
 
-            // 指摘がある項目が1つもないセクションは表示しない
-            if (filteredItems.length === 0) return null;
-
-            return (
-              <div key={sectionName} className="report-group">
-                <div className="report-group-header">{sectionName}</div>
-                {filteredItems.map(itemMaster => {
+          return (
+            <>
+              {hasAnyItem && <div className="report-section-header">点検項目</div>}
+              {Object.entries(sections).map(([sectionName, items]) => {
+                // 指摘内容または処置内容が入力されている項目のみを抽出
+                const filteredItems = items.filter(itemMaster => {
                   const result = currentInspection?.items?.find(i => i.itemId === itemMaster.id);
-                  return (
-                    <div key={itemMaster.id} className="report-item-box">
-                      <div className="report-item-title">{itemMaster.label}</div>
-                      <div className="report-item-row">
-                        <span className="report-item-label">指摘内容（状況）</span>
-                        <div className="report-item-value-line">{result?.comment || ""}</div>
-                      </div>
-                      <div className="report-item-row">
-                        <span className="report-item-label">是正処置</span>
-                        <div className="report-item-value-line">{result?.correctiveAction || ""}</div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          });
+                  const hasComment = result?.comment && result.comment.trim() !== "";
+                  const hasCorrectiveAction = result?.correctiveAction && result.correctiveAction.trim() !== "";
+                  return hasComment || hasCorrectiveAction;
+                });
+
+                // 指摘がある項目が1つもないセクションは表示しない
+                if (filteredItems.length === 0) return null;
+
+                return (
+                  <div key={sectionName} className="report-group">
+                    <div className="report-group-header">{sectionName}</div>
+                    {filteredItems.map(itemMaster => {
+                      const result = currentInspection?.items?.find(i => i.itemId === itemMaster.id);
+                      return (
+                        <div key={itemMaster.id} className="report-item-box">
+                          <div className="report-item-title">{itemMaster.label}</div>
+                          <div className="report-item-row">
+                            <span className="report-item-label">指摘内容（状況）</span>
+                            <div className="report-item-value-line">{result?.comment || ""}</div>
+                          </div>
+                          <div className="report-item-row">
+                            <span className="report-item-label">是正処置</span>
+                            <div className="report-item-value-line">{result?.correctiveAction || ""}</div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </>
+          );
         })()}
 
         {/* ピンがある図面を表示 */}
@@ -1906,6 +2151,218 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {/* スマホアプリQRコードモーダル */}
+      {showAppQrModal && (
+        <div 
+          className="fixed inset-0 z-[12000] bg-black/40 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setShowAppQrModal(false)}
+        >
+          <div 
+            className="w-full max-w-sm flex flex-col items-center animate-fade-in"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="bg-white p-6 rounded-3xl shadow-2xl relative w-full">
+              <button 
+                onClick={() => setShowAppQrModal(false)}
+                className="absolute top-4 right-4 p-2 bg-stone-100 hover:bg-stone-200 text-stone-600 rounded-full transition-colors"
+                title="閉じる"
+              >
+                <X className="w-5 h-5" />
+              </button>
+              <div className="text-center font-bold text-[17px] mb-6 pr-6 text-stone-800">スマホで現場パトロールを開く</div>
+              <div className="bg-stone-50 rounded-2xl p-2 border border-stone-100">
+                <img src="/qr-code.png" alt="スマホアプリ用QRコード" className="w-full h-auto rounded-xl object-contain drop-shadow-sm" />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* 操作マニュアルモーダル */}
+      {showManual && (
+        <div 
+          className="fixed inset-0 z-[12000] bg-black/40 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setShowManual(false)}
+        >
+          <div 
+            className="w-full max-w-4xl max-h-[90vh] flex flex-col items-center animate-fade-in"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="bg-white rounded-3xl shadow-2xl relative w-full flex flex-col overflow-hidden">
+              <header className="p-4 border-b border-stone-100 flex items-center justify-between bg-stone-50/50">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-emerald-100 text-emerald-600 rounded-xl">
+                    <FileText className="w-5 h-5" />
+                  </div>
+                  <h2 className="font-bold text-stone-800">操作マニュアル</h2>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button 
+                    onClick={() => {
+                      const originalTitle = document.title;
+                      document.title = "現場パトロール_操作マニュアル";
+                      window.print();
+                      document.title = originalTitle;
+                    }}
+                    className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl text-sm font-bold hover:bg-emerald-700 transition-colors shadow-md active:scale-95"
+                  >
+                    <Download className="w-4 h-4" />
+                    PDFとして保存
+                  </button>
+                  <button 
+                    onClick={() => setShowManual(false)}
+                    className="p-2 bg-stone-100 hover:bg-stone-200 text-stone-600 rounded-xl transition-colors"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+              </header>
+              <div className="flex-1 overflow-y-auto p-8 bg-white selection:bg-emerald-100">
+                <div id="manual-pdf-content" className="max-w-3xl mx-auto space-y-8 leading-relaxed font-sans" style={{ color: '#292524' }}>
+                  <div className="pb-4 mb-4" style={{ borderBottom: '4px solid #10b981' }}>
+                    <h1 className="text-3xl font-black tracking-tight" style={{ color: '#1c1917' }}>現場パトロール点検アプリ 操作マニュアル</h1>
+                    <p className="font-medium mt-2" style={{ color: '#78716c' }}>建築・建設現場等でのパトロール点検を効率化するためのガイド</p>
+                  </div>
+
+                  {/* 1. ホーム画面 */}
+                  <section className="space-y-4">
+                    <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: '#047857' }}>
+                      <div className="w-2 h-6 rounded-full" style={{ backgroundColor: '#10b981' }} />
+                      1. ホーム画面と現場管理
+                    </h2>
+                    <div className="rounded-2xl p-6 space-y-4" style={{ backgroundColor: '#f5f5f4' }}>
+                      <p className="text-sm font-bold" style={{ color: '#1c1917' }}>アプリを起動すると、登録済みの現場一覧が表示されます。</p>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div className="space-y-2">
+                          <p className="font-bold underline" style={{ color: '#1c1917' }}>現場の追加</p>
+                          <ul className="text-sm space-y-1 list-disc list-inside" style={{ color: '#44403c' }}>
+                            <li>「現場を追加」から現場名、担当者を登録。</li>
+                            <li>図面PDFをアップロード。</li>
+                          </ul>
+                        </div>
+                        <div className="space-y-2">
+                          <p className="font-bold underline" style={{ color: '#1c1917' }}>スマホ連携</p>
+                          <p className="text-sm" style={{ color: '#44403c' }}>右上の「スマホアプリ」ボタンからQRコードを表示し、スマホのカメラでスキャンして利用できます。</p>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+
+                  {/* 2. 点検の開始 */}
+                  <section className="space-y-4">
+                    <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: '#047857' }}>
+                      <div className="w-2 h-6 rounded-full" style={{ backgroundColor: '#10b981' }} />
+                      2. 点検の開始と履歴
+                    </h2>
+                    <div className="rounded-2xl p-5 space-y-3" style={{ border: '1px solid #e7e5e4' }}>
+                      <div className="flex gap-4">
+                        <div className="w-8 h-8 rounded-full text-white flex items-center justify-center font-bold shrink-0" style={{ backgroundColor: '#f59e0b' }}>✓</div>
+                        <div>
+                          <p className="font-bold">新しい点検を開始する</p>
+                          <p className="text-sm" style={{ color: '#78716c' }}>現場を選択し「履歴・新規作成」＞「新しい点検記録を作成」をタップ。</p>
+                        </div>
+                      </div>
+                      <div className="flex gap-4">
+                        <div className="w-8 h-8 rounded-full text-white flex items-center justify-center font-bold shrink-0" style={{ backgroundColor: '#6366f1' }}>R</div>
+                        <div>
+                          <p className="font-bold">過去の履歴を確認する</p>
+                          <p className="text-sm" style={{ color: '#78716c' }}>「過去の点検記録」から過去の内容や写真をいつでも閲覧・編集できます。</p>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+
+                  {/* 3. 点検表の入力 */}
+                  <section className="space-y-4">
+                    <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: '#047857' }}>
+                      <div className="w-2 h-6 rounded-full" style={{ backgroundColor: '#10b981' }} />
+                      3. 点検表の入力
+                    </h2>
+                    <div className="rounded-2xl p-6 border" style={{ backgroundColor: '#ffffff', borderColor: '#e7e5e4' }}>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                        <div className="p-4 rounded-xl" style={{ backgroundColor: '#f9fafb' }}>
+                          <p className="font-bold mb-1">評価とコメント</p>
+                          <p className="text-xs text-stone-500">◯ / ✕ / － で評価し、指摘内容は音声入力（マイク）で簡単に入力可能です。</p>
+                        </div>
+                        <div className="p-4 rounded-xl" style={{ backgroundColor: '#f9fafb' }}>
+                          <p className="font-bold mb-1">写真撮影</p>
+                          <p className="text-xs text-stone-500">カメラアイコンをタップして、状況写真や是正完了写真をその場で撮影・アップロードします。</p>
+                        </div>
+                      </div>
+                      <p className="text-sm font-bold p-2 rounded" style={{ backgroundColor: '#fff7ed', color: '#c2410c' }}>
+                        ※すべての指摘(✕)に是正処置と写真が入力されると、自動的に「処置完了」ステータスになります。
+                      </p>
+                    </div>
+                  </section>
+
+                  {/* 4. 図面指摘 */}
+                  <section className="space-y-4">
+                    <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: '#047857' }}>
+                      <div className="w-2 h-6 rounded-full" style={{ backgroundColor: '#10b981' }} />
+                      4. 図面へのピン打ち（配置指摘）
+                    </h2>
+                    <div className="rounded-2xl p-6 border" style={{ backgroundColor: '#f0fdf4', borderColor: '#dcfce7' }}>
+                      <ul className="space-y-3">
+                        <li className="flex items-start gap-2">
+                          <CheckCircle2 className="w-5 h-5 shrink-0 mt-0.5" style={{ color: '#10b981' }} />
+                          <span style={{ color: '#44403c' }}>「図面を表示する」から、指摘箇所を<b>ロングタップ（長押し）</b>してピンを配置。</span>
+                        </li>
+                        <li className="flex items-start gap-2">
+                          <CheckCircle2 className="w-5 h-5 shrink-0 mt-0.5" style={{ color: '#10b981' }} />
+                          <span style={{ color: '#44403c' }}>ペンツールを使って図面に手書きの注釈を書き込むことも可能です。</span>
+                        </li>
+                      </ul>
+                    </div>
+                  </section>
+
+                  {/* 5. PDF出力 */}
+                  <section className="space-y-4">
+                    <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: '#047857' }}>
+                      <div className="w-2 h-6 rounded-full" style={{ backgroundColor: '#10b981' }} />
+                      5. PDF出力・報告書作成
+                    </h2>
+                    <div className="space-y-3 p-4 rounded-xl" style={{ border: '1px solid #e7e5e4' }}>
+                      <p className="text-sm" style={{ color: '#44403c' }}>画面上の<b>「PDF出力・印刷」</b>をタップ。入力がある項目（指摘や写真）のみが抽出された報告書が生成されます。</p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs font-bold text-stone-500">
+                        <div className="p-2 rounded bg-stone-50">【スマホ】PDFを直接ダウンロード</div>
+                        <div className="p-2 rounded bg-stone-50">【PC】印刷ダイアログから保存・印刷</div>
+                      </div>
+                    </div>
+                  </section>
+
+                  {/* 6. 音声入力のコツ */}
+                  <section className="space-y-4">
+                    <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: '#047857' }}>
+                      <div className="w-2 h-6 rounded-full" style={{ backgroundColor: '#10b981' }} />
+                      6. 音声入力・操作のヒント
+                    </h2>
+                    <div className="p-5 rounded-2xl" style={{ backgroundColor: '#fdf2f8', border: '1px solid #fce7f3' }}>
+                      <ul className="text-sm space-y-2" style={{ color: '#9d174d' }}>
+                        <li>• マイクボタンを押して話すと、自動でテキストに変換されます。</li>
+                        <li>• 騒がしい現場ではスマホを口元に近づけて話すと精度が上がります。</li>
+                        <li>• PCで入力された現場情報をスマホへ連携するにはQRコードが便利です。</li>
+                      </ul>
+                    </div>
+                  </section>
+
+                  <div className="pt-8 mt-8 border-t text-center text-[10px]" style={{ borderColor: '#f5f5f4', color: '#a8a29e' }}>
+                    本マニュアルは 2026年3月19日時点のバージョンに基づいています。
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {isGeneratingPdf && (
+        <div className="fixed inset-0 z-[20000] bg-black/60 backdrop-blur-md flex flex-col items-center justify-center p-6 text-white text-center animate-fade-in">
+          <div className="w-16 h-16 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin mb-6"></div>
+          <h3 className="text-xl font-bold mb-2">PDFを生成中...</h3>
+          <p className="text-white/80 text-sm max-w-xs">
+            画像を圧縮して報告書を作成しています。このまま数十秒ほどお待ちください。
+          </p>
+        </div>
+      )}
     </div>
   );
 }

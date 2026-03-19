@@ -20,6 +20,8 @@ export interface Inspection {
   rank?: string;
   templateVersion?: string;
   status: 'draft' | 'completed';
+  label?: string;
+  drawingStrokes?: string; // JSON string of Stroke[]
   items?: InspectionItem[];
 }
 
