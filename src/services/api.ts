@@ -18,6 +18,9 @@ import {
   getDownloadURL, 
   deleteObject 
 } from "firebase/storage";
+import { 
+  Bytes 
+} from "firebase/firestore";
 import { db, storage } from "../firebase";
 
 export const api = {
@@ -197,17 +200,32 @@ export const api = {
   },
 
   async uploadFile(content: string, mimeType: string = 'application/pdf'): Promise<{ id: string }> {
-    // 1MB制限(Firestore)を回避するためFirebase Storageを使用
+    // 1MB制限(Firestore)を回避しつつCORSエラーを避けるため、
+    // Base64文字列ではなく生のバイナリ(Uint8Array)としてFirestoreに保存します。
+    // これによりBase64の33%のオーバーヘッドがなくなり、804KBのファイルもそのまま保存可能です。
+    
+    // DataURL(文字列)をバイナリに変換
+    const parts = content.split(',');
+    const binaryString = atob(parts[1]);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+    }
+    
+    // 1,048,487 バイト(約1MB)以下ならFirestoreバイナリとして保存
+    if (bytes.length < 1040000) {
+      const docRef = await addDoc(collection(db, "files"), {
+        content: Bytes.fromUint8Array(bytes),
+        mimeType,
+        createdAt: new Date()
+      });
+      return { id: docRef.id };
+    }
+    
+    // それ以上の場合は仕方ないのでStorageを使用（CORS設定が必要）
     const fileId = `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
     const storageRef = ref(storage, `files/${fileId}`);
-    
-    // uploadBytes(Blob)の代わりにuploadString(data_url)を使用
-    // CORSエラーが発生しやすい環境での互換性を高めます
-    await uploadString(storageRef, content, 'data_url', {
-      contentType: mimeType
-    });
-    
-    // IDにプレフィックスをつけてStorage保存であることを明示
+    await uploadString(storageRef, content, 'data_url', { contentType: mimeType });
     return { id: `storage:${fileId}` };
   },
 
@@ -220,7 +238,13 @@ export const api = {
       }
       const docSnap = await getDoc(doc(db, "files", id));
       if (docSnap.exists()) {
-        return docSnap.data().content;
+        const data = docSnap.data();
+        // バイナリ形式(Bytes)かチェックして変換
+        if (data.content instanceof Uint8Array || (data.content && typeof data.content === 'object' && 'toUint8Array' in data.content)) {
+          const blob = new Blob([data.content.toUint8Array ? data.content.toUint8Array() : data.content], { type: data.mimeType || 'application/pdf' });
+          return URL.createObjectURL(blob);
+        }
+        return data.content; // 以前の文字列形式
       }
     } catch (e) {
       console.error("Failed to fetch file:", e);

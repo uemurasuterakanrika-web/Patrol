@@ -589,8 +589,8 @@ export default function App() {
       setIsUploading(true);
       let drawingPdfId = undefined;
       if (newSiteDrawing) {
-        if (newSiteDrawing.length > 10485760) {
-          alert("図面のデータサイズが大きすぎます。解像度を下げるか、ページ数を減らしてください。(上限 10MB)");
+        if (newSiteDrawing.length > 1333333) {
+          alert("図面のデータサイズが大きすぎます。(1MB上限)");
           return;
         }
         console.log("Uploading PDF drawing...");
@@ -630,8 +630,8 @@ export default function App() {
         updates.drawingPdfId = "";
       } else if (newSiteDrawing) {
         // 新しい図面が選択された場合のみアップロードして更新
-        if (newSiteDrawing.length > 10485760) {
-          alert("図面のデータサイズが大きすぎます。解像度を下げるか、ページ数を減らしてください。(上限 10MB)");
+        if (newSiteDrawing.length > 1333333) {
+          alert("図面のデータサイズが大きすぎます。(1MB上限)");
           return;
         }
         console.log("Updating PDF drawing...");
