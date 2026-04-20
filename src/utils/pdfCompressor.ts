@@ -16,7 +16,8 @@ const CMAP_PACKED = true;
  */
 export const compressPdf = async (file: File, targetMaxSizeBytes = 1000000): Promise<string> => {
   // すでに十分小さい場合は、そのままDataURLにして返す（画質劣化を防ぐ）
-  if (file.size < targetMaxSizeBytes * 0.8) {
+  // Base64化によるサイズ増(約1.3倍)を考慮し、700KB以下の時のみ圧縮をスキップする
+  if (file.size < targetMaxSizeBytes * 0.7) {
     return new Promise((resolve) => {
       const reader = new FileReader();
       reader.onload = (e) => resolve(e.target?.result as string);
@@ -39,8 +40,8 @@ export const compressPdf = async (file: File, targetMaxSizeBytes = 1000000): Pro
       let quality = 0.7;
       let finalDataUrl = "";
 
-      // 1MB制限に収まるまで再試行（最大3回）
-      for (let attempt = 0; attempt < 3; attempt++) {
+      // 1MB制限に収まるまで再試行（最大5回）
+      for (let attempt = 0; attempt < 5; attempt++) {
         const compressedPdf = new jsPDF({ unit: 'px', compress: true });
         let isFirstPageReplaced = false;
 
@@ -77,8 +78,11 @@ export const compressPdf = async (file: File, targetMaxSizeBytes = 1000000): Pro
           break;
         } else {
           // サイズオーバーなら品質と解像度を下げて再試行
-          scale -= 0.4;
-          quality -= 0.15;
+          scale -= 0.3;
+          quality -= 0.12;
+          // 最低値を制限
+          if (scale < 0.4) scale = 0.4;
+          if (quality < 0.15) quality = 0.15;
           console.log(`Retrying compression: attempt ${attempt + 1}, scale=${scale}, quality=${quality}`);
         }
       }
