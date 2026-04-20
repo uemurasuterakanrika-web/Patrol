@@ -12,7 +12,13 @@ import {
   orderBy,
   runTransaction
 } from "firebase/firestore";
-import { db } from "../firebase";
+import { 
+  ref, 
+  uploadBytes, 
+  getDownloadURL, 
+  deleteObject 
+} from "firebase/storage";
+import { db, storage } from "../firebase";
 
 export const api = {
   async getSites(): Promise<Site[]> {
@@ -67,7 +73,12 @@ export const api = {
   async deleteFile(id: string | undefined): Promise<void> {
     if (!id || id.startsWith('data:')) return;
     try {
-      await deleteDoc(doc(db, "files", id));
+      if (id.startsWith('storage:')) {
+        const fileId = id.replace('storage:', '');
+        await deleteObject(ref(storage, `files/${fileId}`));
+      } else {
+        await deleteDoc(doc(db, "files", id));
+      }
     } catch (e) {
       console.error(`Failed to delete file ${id}:`, e);
     }
@@ -186,25 +197,33 @@ export const api = {
   },
 
   async uploadFile(content: string, mimeType: string = 'application/pdf'): Promise<{ id: string }> {
-    // Save to Firestore 'files' collection instead of Storage to stay on free tier
-    const docRef = await addDoc(collection(db, "files"), {
-      content,
-      mimeType,
-      createdAt: new Date()
-    });
+    // 1MB制限(Firestore)を回避するためFirebase Storageを使用
+    const fileId = `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
+    const storageRef = ref(storage, `files/${fileId}`);
     
-    return { id: docRef.id };
+    // DataURLをBlobに変換
+    const response = await fetch(content);
+    const blob = await response.blob();
+    
+    await uploadBytes(storageRef, blob, { contentType: mimeType });
+    
+    // IDにプレフィックスをつけてStorage保存であることを明示
+    return { id: `storage:${fileId}` };
   },
 
   async getFileUrl(id: string): Promise<string> {
     if (!id || id.startsWith('data:')) return id; // Already a data URL
     try {
+      if (id.startsWith('storage:')) {
+        const fileId = id.replace('storage:', '');
+        return await getDownloadURL(ref(storage, `files/${fileId}`));
+      }
       const docSnap = await getDoc(doc(db, "files", id));
       if (docSnap.exists()) {
         return docSnap.data().content;
       }
     } catch (e) {
-      console.error("Failed to fetch file from Firestore:", e);
+      console.error("Failed to fetch file:", e);
     }
     return "";
   }
