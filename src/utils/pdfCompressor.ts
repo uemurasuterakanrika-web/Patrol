@@ -34,8 +34,8 @@ export const compressPdf = async (file: File, targetMaxSizeBytes = 1000000): Pro
         cMapPacked: CMAP_PACKED
       }).promise;
       
-      // 最初は高めの設定で試みる
-      let scale = 1.8;
+      // 最初は現実的な設定で試みる
+      let scale = pdf.numPages > 5 ? 1.2 : 1.5; 
       let quality = 0.7;
       let finalDataUrl = "";
 
