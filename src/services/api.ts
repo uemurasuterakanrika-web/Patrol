@@ -14,7 +14,7 @@ import {
 } from "firebase/firestore";
 import { 
   ref, 
-  uploadBytes, 
+  uploadString,
   getDownloadURL, 
   deleteObject 
 } from "firebase/storage";
@@ -201,11 +201,11 @@ export const api = {
     const fileId = `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
     const storageRef = ref(storage, `files/${fileId}`);
     
-    // DataURLをBlobに変換
-    const response = await fetch(content);
-    const blob = await response.blob();
-    
-    await uploadBytes(storageRef, blob, { contentType: mimeType });
+    // uploadBytes(Blob)の代わりにuploadString(data_url)を使用
+    // CORSエラーが発生しやすい環境での互換性を高めます
+    await uploadString(storageRef, content, 'data_url', {
+      contentType: mimeType
+    });
     
     // IDにプレフィックスをつけてStorage保存であることを明示
     return { id: `storage:${fileId}` };
