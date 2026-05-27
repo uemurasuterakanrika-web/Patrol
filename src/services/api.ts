@@ -119,9 +119,19 @@ export const api = {
     const snapshot = await getDocs(firestoreQuery);
     const inspections = snapshot.docs.map(d => ({ id: d.id, ...d.data() as any } as Inspection));
     
-    // Fetch site names for each inspection if needed
-    // (In Firestore, it's often better to denormalize siteName into the inspection document)
-    return inspections;
+    // 論理削除されたレコードは通常リストから除外する
+    return inspections.filter(i => !i.deleted);
+  },
+
+  // ゴミ箱：論理削除済みの点検記録一覧を取得
+  async getDeletedInspections(): Promise<Inspection[]> {
+    const q = query(
+      collection(db, "inspections"),
+      where("deleted", "==", true),
+      orderBy("deletedAt", "desc")
+    );
+    const snapshot = await getDocs(q);
+    return snapshot.docs.map(d => ({ id: d.id, ...d.data() as any } as Inspection));
   },
 
   async getInspection(id: string): Promise<Inspection> {
@@ -153,6 +163,25 @@ export const api = {
     }
   },
 
+  // 論理削除：データは残したままdeleted=trueフラグを立てる（30日間復元可能）
+  async softDeleteInspection(id: string): Promise<void> {
+    const docRef = doc(db, "inspections", id);
+    await updateDoc(docRef, {
+      deleted: true,
+      deletedAt: Date.now()
+    });
+  },
+
+  // 復元：論理削除フラグを取り除いて通常リストに戻す
+  async restoreInspection(id: string): Promise<void> {
+    const docRef = doc(db, "inspections", id);
+    await updateDoc(docRef, {
+      deleted: false,
+      deletedAt: null
+    });
+  },
+
+  // 完全削除（ゴミ箱から手動削除 or 30日経過後に呼ぶ）
   async deleteInspection(id: string): Promise<void> {
     // 1. サブコレクション (items) の中のドキュメント群にあるファイルを削除
     const itemsSnap = await getDocs(collection(db, "inspections", id, "items"));
@@ -182,6 +211,23 @@ export const api = {
     
     // 2. 点検自体を削除
     await deleteDoc(doc(db, "inspections", id));
+  },
+
+  // 30日超の論理削除データを完全削除（ゴミ箱の自動クリーンアップ）
+  async purgeExpiredDeletedInspections(): Promise<number> {
+    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const q = query(
+      collection(db, "inspections"),
+      where("deleted", "==", true),
+      where("deletedAt", "<", thirtyDaysAgo)
+    );
+    const snapshot = await getDocs(q);
+    let count = 0;
+    for (const d of snapshot.docs) {
+      await this.deleteInspection(d.id);
+      count++;
+    }
+    return count;
   },
 
   async registerItemResult(inspectionId: string, item: Partial<InspectionItem>): Promise<void> {

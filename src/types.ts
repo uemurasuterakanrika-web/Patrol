@@ -23,6 +23,9 @@ export interface Inspection {
   label?: string;
   drawingStrokes?: string; // JSON string of Stroke[]
   items?: InspectionItem[];
+  // 論理削除フィールド
+  deleted?: boolean;
+  deletedAt?: number;
 }
 
 export interface DrawingMarker {
