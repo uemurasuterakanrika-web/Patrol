@@ -791,80 +791,84 @@ export default function App() {
             e.target.value = '';
           }}
         />
+        {/* モバイル用の背景オーバーレイ */}
         {isSidebarOpen && (
-          <>
-            <div
-              onClick={() => setIsSidebarOpen(false)}
-              className="fixed inset-0 bg-black/20 backdrop-blur-sm z-40 lg:hidden"
-            />
-            <aside
-              className="fixed inset-y-0 left-0 w-72 bg-white border-r border-stone-200 z-50 lg:relative lg:translate-x-0 flex flex-col shadow-xl lg:shadow-none"
-            >
-              <div className="p-4 border-b border-stone-100 flex justify-between items-center">
-                <h2 className="font-bold text-lg flex items-center gap-2">
-                  <ClipboardCheck className="w-5 h-5 text-emerald-600" />
-                  点検履歴
-                </h2>
-                <button onClick={() => setIsSidebarOpen(false)} title="閉じる" className="lg:hidden p-1 hover:bg-stone-100 rounded">
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              <div className="flex-1 overflow-y-auto p-2 space-y-2">
-                {inspections.map(insp => (
-                  <div key={insp.id} className="relative group/item">
-                    <button
-                      onClick={() => selectInspection(insp.id)}
-                      className={cn(
-                        "w-full text-left p-3 rounded-xl border",
-                        currentInspection?.id === insp.id
-                          ? "bg-emerald-50 border-emerald-200 shadow-sm"
-                          : "bg-white border-stone-100 hover:border-stone-300"
-                      )}
-                    >
-                      <div className="text-xs text-stone-500 mb-1 flex justify-between">
-                        <span>{insp.label || insp.date}</span>
-                        <div className="flex gap-1">
-                          {insp.status === 'completed' ? (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-700">処置完了</span>
-                          ) : (
-                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700">処置完了報告待ち</span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="font-medium text-sm line-clamp-1">{insp.siteName || '名称未設定'}</div>
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        handleDeleteInspection(e, insp.id);
-                      }}
-                      title="点検履歴を削除"
-                      className="absolute top-2 right-2 p-1.5 bg-white border border-stone-100 text-stone-300 hover:text-rose-600 hover:border-rose-100 rounded-lg opacity-0 group-hover/item:opacity-100 shadow-sm"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-
-              {/* ゴミ箱ボタン */}
-              <div className="p-3 border-t border-stone-100">
-                <button
-                  onClick={() => {
-                    loadDeletedInspections();
-                    setShowTrash(true);
-                  }}
-                  className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-stone-500 hover:bg-rose-50 hover:text-rose-600 text-sm transition-colors"
-                >
-                  <Trash2 className="w-4 h-4" />
-                  ゴミ箱（削除済み記録）
-                </button>
-              </div>
-            </aside>
-          </>
+          <div
+            onClick={() => setIsSidebarOpen(false)}
+            className="fixed inset-0 bg-black/20 backdrop-blur-sm z-40 lg:hidden"
+          />
         )}
+
+        {/* サイドバー本体：デスクトップでは常時表示、モバイルでは isSidebarOpen 時のみ表示 */}
+        <aside
+          className={cn(
+            "fixed inset-y-0 left-0 w-72 bg-white border-r border-stone-200 z-50 flex flex-col shadow-xl lg:shadow-none transition-transform lg:translate-x-0 lg:relative lg:flex",
+            isSidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
+          )}
+        >
+          <div className="p-4 border-b border-stone-100 flex justify-between items-center">
+            <h2 className="font-bold text-lg flex items-center gap-2">
+              <ClipboardCheck className="w-5 h-5 text-emerald-600" />
+              点検履歴
+            </h2>
+            <button onClick={() => setIsSidebarOpen(false)} title="閉じる" className="lg:hidden p-1 hover:bg-stone-100 rounded">
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-2 space-y-2">
+            {inspections.map(insp => (
+              <div key={insp.id} className="relative group/item">
+                <button
+                  onClick={() => selectInspection(insp.id)}
+                  className={cn(
+                    "w-full text-left p-3 rounded-xl border",
+                    currentInspection?.id === insp.id
+                      ? "bg-emerald-50 border-emerald-200 shadow-sm"
+                      : "bg-white border-stone-100 hover:border-stone-300"
+                  )}
+                >
+                  <div className="text-xs text-stone-500 mb-1 flex justify-between">
+                    <span>{insp.label || insp.date}</span>
+                    <div className="flex gap-1">
+                      {insp.status === 'completed' ? (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-700">処置完了</span>
+                      ) : (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700">処置完了報告待ち</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="font-medium text-sm line-clamp-1">{insp.siteName || '名称未設定'}</div>
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    handleDeleteInspection(e, insp.id);
+                  }}
+                  title="点検履歴を削除"
+                  className="absolute top-2 right-2 p-1.5 bg-white border border-stone-100 text-stone-300 hover:text-rose-600 hover:border-rose-100 rounded-lg opacity-0 group-hover/item:opacity-100 shadow-sm"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* ゴミ箱ボタン */}
+          <div className="p-3 border-t border-stone-100">
+            <button
+              onClick={() => {
+                loadDeletedInspections();
+                setShowTrash(true);
+              }}
+              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-stone-500 hover:bg-rose-50 hover:text-rose-600 text-sm transition-colors"
+            >
+              <Trash2 className="w-4 h-4" />
+              ゴミ箱（削除済み記録）
+            </button>
+          </div>
+        </aside>
 
         {/* ゴミ箱モーダル */}
         {showTrash && (
@@ -951,7 +955,7 @@ export default function App() {
       <main className="flex-1 flex flex-col relative h-full">
         <header className="h-16 bg-white border-b border-stone-200 flex items-center justify-between px-4 sticky top-0 z-30">
           <div className="flex items-center gap-3">
-            {currentInspection && (
+            {currentInspection ? (
               <button
                 onClick={() => {
                   setCurrentInspection(null);
@@ -964,6 +968,14 @@ export default function App() {
               >
                 <ArrowLeft className="w-6 h-6" />
               </button>
+            ) : (
+              <button
+                onClick={() => setIsSidebarOpen(true)}
+                className="p-2 hover:bg-stone-100 rounded-lg lg:hidden"
+                title="メニューを開く"
+              >
+                <Menu className="w-6 h-6" />
+              </button>
             )}
 
             <div>
@@ -975,6 +987,17 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-1">
+            {/* ゴミ箱ボタン（常時表示） */}
+            <button
+              onClick={() => {
+                loadDeletedInspections();
+                setShowTrash(true);
+              }}
+              className="p-2.5 hover:bg-rose-50 rounded-xl text-stone-400 hover:text-rose-500 flex items-center justify-center transition-colors active:scale-95"
+              title="ゴミ箱（削除済み点検記録）"
+            >
+              <Trash2 className="w-5 h-5" />
+            </button>
             <button
               onClick={() => setShowManual(true)}
               className="flex items-center gap-2 px-3 py-2 bg-stone-100 text-stone-600 hover:bg-stone-200 rounded-xl text-xs sm:text-sm font-bold transition-colors"
