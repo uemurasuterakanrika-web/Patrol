@@ -427,14 +427,16 @@ export default function App() {
     // Inspections Listener
     const qInspections = query(collection(db, "inspections"), orderBy("date", "desc"));
     const unsubInspections = onSnapshot(qInspections, (snapshot) => {
-      const inspectionsData = snapshot.docs.map(d => {
-        const data = d.data();
-        return { 
-          id: d.id, 
-          status: 'draft', 
-          ...data 
-        } as Inspection;
-      });
+      const inspectionsData = snapshot.docs
+        .map(d => {
+          const data = d.data();
+          return { 
+            id: d.id, 
+            status: 'draft', 
+            ...data 
+          } as Inspection;
+        })
+        .filter(i => !i.deleted);
       setInspections(inspectionsData);
       
       // Update current inspection if it was updated
