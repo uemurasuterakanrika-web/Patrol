@@ -127,11 +127,17 @@ export const api = {
   async getDeletedInspections(): Promise<Inspection[]> {
     const q = query(
       collection(db, "inspections"),
-      where("deleted", "==", true),
-      orderBy("deletedAt", "desc")
+      where("deleted", "==", true)
     );
     const snapshot = await getDocs(q);
-    return snapshot.docs.map(d => ({ id: d.id, ...d.data() as any } as Inspection));
+    const inspections = snapshot.docs.map(d => ({ id: d.id, ...d.data() as any } as Inspection));
+    
+    // クライアント側で並び替えを実施（削除日時の降順）
+    return inspections.sort((a, b) => {
+      const aTime = a.deletedAt || 0;
+      const bTime = b.deletedAt || 0;
+      return bTime - aTime;
+    });
   },
 
   async getInspection(id: string): Promise<Inspection> {
